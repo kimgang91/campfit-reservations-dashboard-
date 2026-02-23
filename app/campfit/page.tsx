@@ -46,6 +46,13 @@ interface PlanStats {
   changeCount: number;
 }
 
+interface MonthKPI {
+  newCount: number;
+  endCount: number;
+  net: number;
+  topMd: { md: string; count: number } | null;
+}
+
 const COLORS = ['#4f46e5', '#22c55e', '#f97316', '#06b6d4', '#a855f7', '#e11d48', '#0f766e'];
 
 function parseDate(value?: string | null): Date | null {
@@ -269,7 +276,7 @@ export default function CampfitDashboardPage() {
     return activeNames.size;
   }, [filtered, referenceDate]);
 
-  const thisMonthKPI = useMemo(() => {
+  const thisMonthKPI = useMemo<MonthKPI>(() => {
     const start = startOfMonth(referenceDate);
     const end = endOfMonth(referenceDate);
     let newCount = 0;
@@ -613,10 +620,10 @@ export default function CampfitDashboardPage() {
             {thisMonthKPI.topMd ? (
               <>
                 <div className="text-sm md:text-base font-semibold truncate">
-                  {thisMonthKPI.topMd.md}
+                  {thisMonthKPI.topMd?.md}
                 </div>
                 <div className="text-xs md:text-sm text-amber-100 mt-1">
-                  신규 {thisMonthKPI.topMd.count.toLocaleString()}건
+                  신규 {thisMonthKPI.topMd?.count.toLocaleString()}건
                 </div>
               </>
             ) : (
