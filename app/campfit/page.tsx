@@ -245,23 +245,6 @@ export default function CampfitDashboardPage() {
         const churn = calculateChurn(names);
         setLostCampgrounds(churn.lost);
         setRejoinedCampgrounds(churn.rejoined);
-
-        if (rows.length > 0 && !startDateStr && !endDateStr) {
-          const dates: Date[] = [];
-          rows.forEach((r) => {
-            const s = parseDate(r.planStartDate);
-            if (s) dates.push(s);
-          });
-          if (dates.length) {
-            const max = dates.reduce((acc, cur) => (isAfter(cur, acc) ? cur : acc), dates[0]);
-            const rangeEnd = endOfMonth(max);
-            const rangeStart = startOfMonth(new Date(rangeEnd));
-            rangeStart.setMonth(rangeStart.getMonth() - 2);
-            const fmt = (d: Date) => format(d, 'yyyy-MM-dd');
-            setStartDateStr(fmt(rangeStart));
-            setEndDateStr(fmt(rangeEnd));
-          }
-        }
       } catch (e: any) {
         console.error(e);
         setError(e?.message || '데이터를 불러오는 중 오류가 발생했습니다.');
@@ -645,7 +628,7 @@ export default function CampfitDashboardPage() {
                 캠핏 예약팀 입점/플랜 현황 대시보드
               </h1>
               <p className="text-sm md:text-base text-gray-600">
-                입점 현황, 플랜 변화, MD 성과를 일/주/월 단위로 분석합니다
+                현재 스프레드시트 기준으로 운영 캠핑장, 대표 플랜, MD 성과를 요약해서 보여줍니다.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -662,58 +645,6 @@ export default function CampfitDashboardPage() {
               <div className="text-xs md:text-sm text-gray-500 bg-gray-50 px-3 py-2 rounded-lg">
                 총 <span className="font-bold text-indigo-600">{data.length.toLocaleString()}</span>건
               </div>
-            </div>
-          </div>
-
-          {/* 기간 설정 */}
-          <div className="mt-6 flex flex-wrap gap-4 items-center">
-            <div className="flex gap-2">
-              <button
-                onClick={() => setPeriodUnit('day')}
-                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                  periodUnit === 'day'
-                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg'
-                    : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-blue-400'
-                }`}
-              >
-                일별
-              </button>
-              <button
-                onClick={() => setPeriodUnit('week')}
-                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                  periodUnit === 'week'
-                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg'
-                    : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-blue-400'
-                }`}
-              >
-                주별
-              </button>
-              <button
-                onClick={() => setPeriodUnit('month')}
-                className={`px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                  periodUnit === 'month'
-                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg'
-                    : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-blue-400'
-                }`}
-              >
-                월별
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-3 items-center text-sm">
-              <span className="text-gray-700 font-semibold">기간</span>
-              <input
-                type="date"
-                value={startDateStr || ''}
-                onChange={(e) => setStartDateStr(e.target.value || undefined)}
-                className="px-3 py-2 rounded-lg border-2 border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 text-sm"
-              />
-              <span className="text-gray-500 font-bold">~</span>
-              <input
-                type="date"
-                value={endDateStr || ''}
-                onChange={(e) => setEndDateStr(e.target.value || undefined)}
-                className="px-3 py-2 rounded-lg border-2 border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 text-sm"
-              />
             </div>
           </div>
         </header>
