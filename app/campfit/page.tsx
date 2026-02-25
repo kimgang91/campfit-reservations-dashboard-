@@ -79,6 +79,85 @@ const COLORS = [
   '#ec4899',
 ];
 
+// 로컬 스냅샷/히스토리 저장용 키
+const SNAPSHOT_KEY = 'campfit_prev_snapshot_v1';
+const HISTORY_KEY = 'campfit_history_v1';
+
+type HistoryStatus = 'active' | 'churned';
+
+interface HistoryEntry {
+  status: HistoryStatus;
+  everSeen: boolean;
+  updatedAt: number;
+}
+
+function calculateChurn(currentNames: string[]): { lost: string[]; rejoined: string[] } {
+  if (typeof window === 'undefined') return { lost: [], rejoined: [] };
+
+  const now = Date.now();
+
+  let prevNames: string[] = [];
+  let history: Record<string, HistoryEntry> = {};
+
+  try {
+    const prevRaw = window.localStorage.getItem(SNAPSHOT_KEY);
+    if (prevRaw) prevNames = JSON.parse(prevRaw);
+  } catch {
+    prevNames = [];
+  }
+
+  try {
+    const histRaw = window.localStorage.getItem(HISTORY_KEY);
+    if (histRaw) history = JSON.parse(histRaw);
+  } catch {
+    history = {};
+  }
+
+  const prevSet = new Set(prevNames);
+  const currSet = new Set(currentNames);
+
+  const lost: string[] = [];
+  const rejoined: string[] = [];
+
+  // 이전에는 있었는데, 지금은 없는 캠핑장 = 이탈
+  prevSet.forEach((name) => {
+    if (!currSet.has(name)) {
+      lost.push(name);
+      const prev = history[name] || { status: 'active' as HistoryStatus, everSeen: true, updatedAt: now };
+      history[name] = { status: 'churned', everSeen: true, updatedAt: now };
+      if (!prev.everSeen) {
+        history[name].everSeen = true;
+      }
+    }
+  });
+
+  // 새로 등장한 캠핑장: 신규 또는 재입점
+  currSet.forEach((name) => {
+    const prev = history[name];
+    if (!prev) {
+      // 처음 등장한 캠핑장 = 신규
+      history[name] = { status: 'active', everSeen: true, updatedAt: now };
+    } else if (prev.status === 'churned' && !prevSet.has(name)) {
+      // 이전에 이탈 상태였다가 다시 나타난 경우 = 재입점
+      rejoined.push(name);
+      history[name] = { status: 'active', everSeen: true, updatedAt: now };
+    } else {
+      // 계속 운영 중
+      history[name] = { status: 'active', everSeen: prev.everSeen, updatedAt: now };
+    }
+  });
+
+  // 스냅샷/히스토리 저장
+  try {
+    window.localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(currentNames));
+    window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    // 저장 실패는 분석 기능에만 영향, 무시
+  }
+
+  return { lost, rejoined };
+}
+
 function parseDate(value?: string | null): Date | null {
   if (!value) return null;
   try {
@@ -122,6 +201,8 @@ export default function CampfitDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAllData, setShowAllData] = useState(false);
+  const [lostCampgrounds, setLostCampgrounds] = useState<string[]>([]);
+  const [rejoinedCampgrounds, setRejoinedCampgrounds] = useState<string[]>([]);
 
   const [periodUnit, setPeriodUnit] = useState<PeriodUnit>('month');
   const [startDateStr, setStartDateStr] = useState<string | undefined>();
@@ -158,6 +239,12 @@ export default function CampfitDashboardPage() {
 
         const rows: CampfitPlanRecord[] = Array.isArray(json.data) ? json.data : [];
         setData(rows);
+
+        // 이탈/재입점 캠핑장 계산 (이전 스냅샷 대비)
+        const names = rows.map((r) => r.campgroundName).filter(Boolean);
+        const churn = calculateChurn(names);
+        setLostCampgrounds(churn.lost);
+        setRejoinedCampgrounds(churn.rejoined);
 
         if (rows.length > 0 && !startDateStr && !endDateStr) {
           const dates: Date[] = [];
@@ -877,7 +964,53 @@ export default function CampfitDashboardPage() {
           </div>
         </section>
 
-        {/* 데이터 테이블 */}
+        {/* 이탈/재입점 캠핑장 요약 */}
+        <section className="bg-white/80 backdrop-blur-sm rounded-3xl shadow-xl border border-gray-200/50 p-6 md:p-8">
+          <h2 className="text-lg md:text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <span className="text-2xl">🚦</span> 이탈 / 재입점 캠핑장 (이전 스냅샷 대비)
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-red-700">이탈 캠핑장</h3>
+                <span className="px-2 py-1 rounded-full bg-red-50 text-red-700 text-xs font-semibold">
+                  {lostCampgrounds.length}개
+                </span>
+              </div>
+              {lostCampgrounds.length === 0 ? (
+                <p className="text-xs text-gray-500">이전 스냅샷 대비 이탈한 캠핑장이 없습니다.</p>
+              ) : (
+                <ul className="max-h-40 overflow-auto text-xs text-gray-700 space-y-1 border rounded-lg p-2">
+                  {lostCampgrounds.map((name) => (
+                    <li key={`lost-${name}`}>{name}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-emerald-700">재입점 캠핑장</h3>
+                <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-semibold">
+                  {rejoinedCampgrounds.length}개
+                </span>
+              </div>
+              {rejoinedCampgrounds.length === 0 ? (
+                <p className="text-xs text-gray-500">이전 스냅샷에서 이탈했다가 다시 입점한 캠핑장이 없습니다.</p>
+              ) : (
+                <ul className="max-h-40 overflow-auto text-xs text-gray-700 space-y-1 border rounded-lg p-2">
+                  {rejoinedCampgrounds.map((name) => (
+                    <li key={`rejoined-${name}`}>{name}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <p className="mt-3 text-[11px] text-gray-400">
+            브라우저 기준으로 직전 조회 결과와 비교해 이탈/재입점을 계산합니다. (기록은 로컬 저장소에만 보관됩니다)
+          </p>
+        </section>
+
+        {/* 데이터 테이블 (전체/필터링된 데이터) */}
         <section className="bg-white/80 backdrop-blur-sm rounded-3xl shadow-xl border border-gray-200/50 p-6 md:p-8">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg md:text-xl font-bold text-gray-800 flex items-center gap-2">
