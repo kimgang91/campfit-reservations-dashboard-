@@ -25,7 +25,11 @@ const CAMPFIT_SPREADSHEET_ID = '1lLUbwO8TATN1wRG6TuQel0m7arNudnfxW3pdchYXn8M';
 const CAMPFIT_SHEET_ID = '1871420372'; // gid
 
 function getCSVUrl(sheetId: string) {
-  return `https://docs.google.com/spreadsheets/d/${CAMPFIT_SPREADSHEET_ID}/export?format=csv&gid=${sheetId}`;
+  // Google Sheets CSV export는 기본적으로 제한이 있을 수 있으므로,
+  // 전체 데이터를 가져오기 위해 범위를 명시하지 않고 전체 시트를 가져오도록 설정
+  // 참고: Google Sheets CSV export는 기본적으로 최대 10,000행까지 지원하지만,
+  // 실제로는 더 적을 수 있으므로 로그로 확인 필요
+  return `https://docs.google.com/spreadsheets/d/${CAMPFIT_SPREADSHEET_ID}/export?format=csv&gid=${sheetId}&single=true`;
 }
 
 // 간단한 CSV 파서
@@ -163,6 +167,8 @@ function findColumnIndex(
 }
 
 // 시트에서 캠핏 예약팀 데이터 가져오기
+// 🔸 요구사항: 시트에 있는 캠핑장(플랜) 데이터를 최대한 모두 가져온다
+// 🔸 단순하고 확실한 방식으로 B~K 컬럼 인덱스를 고정해서 파싱
 export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
   try {
     const csvUrl = getCSVUrl(CAMPFIT_SHEET_ID);
@@ -186,66 +192,68 @@ export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
       return [];
     }
 
-    const { headerRowIndex, headers } = detectHeaderRow(rows);
-    const columnMap = buildColumnIndexMap(headers);
+    // 1행을 헤더로 간주하고, 2행부터 데이터를 사용 (스펙: B~K 컬럼 고정)
+    const headers = rows[0] || [];
+    const dataRows = rows.slice(1);
 
-    console.log('[Campfit] Header row index:', headerRowIndex + 1);
-    console.log('[Campfit] Headers:', headers);
+    console.log('[Campfit] Total CSV rows:', rows.length);
+    console.log('[Campfit] Header row:', headers);
+    console.log('[Campfit] Data rows (excluding header):', dataRows.length);
 
-    const idxCampground = findColumnIndex(headers, columnMap, ['캠핑장명'], 1);
-    const idxOperateStatus = findColumnIndex(headers, columnMap, ['운영상태'], 2);
-    const idxDetailPlan = findColumnIndex(headers, columnMap, ['세부플랜명', '세부 플랜명'], 3);
-    const idxMainPlan = findColumnIndex(headers, columnMap, ['대표플랜명', '대표 플랜명'], 4);
-    const idxBundleSub = findColumnIndex(headers, columnMap, ['결합형 소분류', '결합형소분류'], 5);
-    const idxEasyCamping = findColumnIndex(headers, columnMap, ['이지캠핑', '이지 캠핑'], 6);
-    const idxPlanStatus = findColumnIndex(headers, columnMap, ['플랜상태'], 7);
-    const idxStartDate = findColumnIndex(headers, columnMap, ['플랜등록일', '플랜 등록일', '시작일'], 8);
-    const idxEndDate = findColumnIndex(headers, columnMap, ['플랜취소일', '플랜 취소일', '종료일'], 9);
-    const idxMd = findColumnIndex(headers, columnMap, ['담당 MD', '담당MD', 'MD'], 10);
-
-    const dataStartIndex = headerRowIndex + 1;
-    const dataRows = rows.slice(dataStartIndex);
+    // B~K 컬럼 인덱스 (0-based)
+    const IDX_B = 1; // 캠핑장명
+    const IDX_C = 2; // 운영상태
+    const IDX_D = 3; // 세부플랜명
+    const IDX_E = 4; // 대표플랜명
+    const IDX_F = 5; // 결합형 소분류
+    const IDX_G = 6; // 이지캠핑
+    const IDX_H = 7; // 플랜상태
+    const IDX_I = 8; // 플랜등록일
+    const IDX_J = 9; // 플랜취소일
+    const IDX_K = 10; // 담당 MD
 
     const records: CampfitPlanRecord[] = [];
 
     dataRows.forEach((row, i) => {
-      const rowNumber = dataStartIndex + i + 1;
+      const rowNumber = i + 2; // 1-based, 헤더 다음 행부터
 
-      const campgroundName =
-        (idxCampground != null && row[idxCampground] ? row[idxCampground].trim() : '') || '';
-      if (!campgroundName) {
+      // 캠핑장명(B)이 비어있으면 스킵 (타이틀/빈 행)
+      const campgroundName = (row[IDX_B] || '').trim();
+      if (!campgroundName || campgroundName === '캠핑장명') {
         return;
       }
 
+      const operateStatus = (row[IDX_C] || '').trim() || undefined;
+      const detailPlanName = (row[IDX_D] || '').trim() || undefined;
+      const mainPlanName = (row[IDX_E] || '').trim() || undefined;
+      const bundleSubType = (row[IDX_F] || '').trim() || undefined;
+      const easyCamping = (row[IDX_G] || '').trim() || undefined;
+      const planStatus = (row[IDX_H] || '').trim() || undefined;
+      const planStartDate = row[IDX_I] ? toISODate(row[IDX_I]) : null;
+      const planEndDate = row[IDX_J] ? toISODate(row[IDX_J]) : null;
+      const md = (row[IDX_K] || '').trim() || undefined;
+
       const raw: Record<string, string> = {};
       headers.forEach((h, idx) => {
-        const key = h?.trim();
+        const key = String(h || '').trim();
         if (!key) return;
         raw[key] = String(row[idx] ?? '').trim();
       });
 
-      const record: CampfitPlanRecord = {
+      records.push({
         rowNumber,
         campgroundName,
-        operateStatus:
-          idxOperateStatus != null && row[idxOperateStatus] ? row[idxOperateStatus].trim() : undefined,
-        detailPlanName:
-          idxDetailPlan != null && row[idxDetailPlan] ? row[idxDetailPlan].trim() : undefined,
-        mainPlanName: idxMainPlan != null && row[idxMainPlan] ? row[idxMainPlan].trim() : undefined,
-        bundleSubType:
-          idxBundleSub != null && row[idxBundleSub] ? row[idxBundleSub].trim() : undefined,
-        easyCamping:
-          idxEasyCamping != null && row[idxEasyCamping] ? row[idxEasyCamping].trim() : undefined,
-        planStatus:
-          idxPlanStatus != null && row[idxPlanStatus] ? row[idxPlanStatus].trim() : undefined,
-        planStartDate:
-          idxStartDate != null && row[idxStartDate] ? toISODate(row[idxStartDate]) : null,
-        planEndDate: idxEndDate != null && row[idxEndDate] ? toISODate(row[idxEndDate]) : null,
-        md: idxMd != null && row[idxMd] ? row[idxMd].trim() : undefined,
+        operateStatus,
+        detailPlanName,
+        mainPlanName,
+        bundleSubType,
+        easyCamping,
+        planStatus,
+        planStartDate,
+        planEndDate,
+        md,
         raw,
-      };
-
-      records.push(record);
+      });
     });
 
     console.log(`[Campfit] Parsed records: ${records.length}`);
