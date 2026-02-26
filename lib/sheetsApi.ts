@@ -4,13 +4,16 @@
  * 같은 스프레드시트에 "스냅샷" / "이력관리" 시트를 자동 생성하고,
  * 이탈/재입점/신규 이벤트를 기록합니다.
  *
- * 필요 환경변수:
- *   GOOGLE_SERVICE_ACCOUNT_KEY  — 서비스 계정 JSON 키 (전체 JSON 문자열)
+ * 인증 방법 (우선순위):
+ *   1. GOOGLE_SERVICE_ACCOUNT_KEY 환경변수 (JSON 문자열)
+ *   2. 프로젝트 루트의 서비스 계정 JSON 파일 (dashboard-*.json 또는 *-service-account*.json)
  *
  * 서비스 계정 이메일에 해당 스프레드시트 편집 권한을 부여해야 합니다.
  */
 
 import { google } from 'googleapis';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const SPREADSHEET_ID = '1lLUbwO8TATN1wRG6TuQel0m7arNudnfxW3pdchYXn8M';
 const SNAPSHOT_SHEET = '스냅샷';
@@ -18,20 +21,60 @@ const HISTORY_SHEET = '이력관리';
 
 // ─── 인증 ───
 
-function getAuth() {
+/** 서비스 계정 키를 환경변수 또는 로컬 JSON 파일에서 로드 */
+function loadServiceAccountKey(): any {
+  // 1) 환경변수에서 읽기
   const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-  if (!keyJson) {
-    throw new Error(
-      'GOOGLE_SERVICE_ACCOUNT_KEY 환경변수가 설정되지 않았습니다. ' +
-      'Google Cloud 서비스 계정의 JSON 키를 환경변수로 등록해 주세요.',
-    );
+  if (keyJson) {
+    try {
+      const parsed = JSON.parse(keyJson);
+      console.log('[SheetsAPI] 환경변수에서 서비스 계정 키 로드 성공 (client_email:', parsed.client_email, ')');
+      return parsed;
+    } catch (e) {
+      console.error('[SheetsAPI] GOOGLE_SERVICE_ACCOUNT_KEY 환경변수 JSON 파싱 실패:', e);
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY JSON 파싱에 실패했습니다. 올바른 JSON인지 확인해 주세요.');
+    }
   }
 
-  let key: any;
+  // 2) 프로젝트 루트에서 JSON 키 파일 검색
+  const projectRoot = process.cwd();
+  console.log('[SheetsAPI] 환경변수 미설정, 프로젝트 루트에서 JSON 키 파일 검색:', projectRoot);
+
   try {
-    key = JSON.parse(keyJson);
-  } catch {
-    throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY JSON 파싱에 실패했습니다. 올바른 JSON인지 확인해 주세요.');
+    const files = fs.readdirSync(projectRoot);
+    const keyFile = files.find(
+      (f) =>
+        f.endsWith('.json') &&
+        (f.includes('dashboard-') || f.includes('service-account') || f.includes('service_account')) &&
+        !f.startsWith('package') &&
+        !f.startsWith('tsconfig'),
+    );
+
+    if (keyFile) {
+      const filePath = path.join(projectRoot, keyFile);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed.client_email && parsed.private_key) {
+        console.log('[SheetsAPI] 로컬 JSON 키 파일에서 서비스 계정 키 로드 성공:', keyFile, '(client_email:', parsed.client_email, ')');
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.error('[SheetsAPI] 로컬 JSON 키 파일 검색/읽기 실패:', e);
+  }
+
+  return null;
+}
+
+function getAuth() {
+  const key = loadServiceAccountKey();
+  if (!key) {
+    throw new Error(
+      'Google 서비스 계정 키를 찾을 수 없습니다. ' +
+      '다음 중 하나를 설정해 주세요:\n' +
+      '1. GOOGLE_SERVICE_ACCOUNT_KEY 환경변수 (Vercel)\n' +
+      '2. 프로젝트 루트에 서비스 계정 JSON 키 파일 배치 (로컬)',
+    );
   }
 
   return new google.auth.GoogleAuth({
@@ -216,5 +259,67 @@ export async function readHistory(): Promise<HistoryRecord[]> {
 // ─── 서비스 계정 설정 여부 확인 ───
 
 export function isConfigured(): boolean {
-  return !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  // 환경변수 체크
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) return true;
+
+  // 로컬 JSON 파일 체크
+  try {
+    const projectRoot = process.cwd();
+    const files = fs.readdirSync(projectRoot);
+    const keyFile = files.find(
+      (f) =>
+        f.endsWith('.json') &&
+        (f.includes('dashboard-') || f.includes('service-account') || f.includes('service_account')) &&
+        !f.startsWith('package') &&
+        !f.startsWith('tsconfig'),
+    );
+    if (keyFile) {
+      const content = fs.readFileSync(path.join(projectRoot, keyFile), 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed.client_email && parsed.private_key) return true;
+    }
+  } catch {
+    // 파일 검색 실패 시 false
+  }
+
+  return false;
+}
+
+/** 연동 상태를 상세히 반환 (디버깅용) */
+export function getConfigStatus(): { configured: boolean; source: string; email?: string; error?: string } {
+  // 환경변수
+  const envKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  if (envKey) {
+    try {
+      const parsed = JSON.parse(envKey);
+      return { configured: true, source: 'environment', email: parsed.client_email };
+    } catch (e: any) {
+      return { configured: false, source: 'environment', error: `환경변수 JSON 파싱 실패: ${e.message}` };
+    }
+  }
+
+  // 로컬 JSON 파일
+  try {
+    const projectRoot = process.cwd();
+    const files = fs.readdirSync(projectRoot);
+    const keyFile = files.find(
+      (f) =>
+        f.endsWith('.json') &&
+        (f.includes('dashboard-') || f.includes('service-account') || f.includes('service_account')) &&
+        !f.startsWith('package') &&
+        !f.startsWith('tsconfig'),
+    );
+    if (keyFile) {
+      const content = fs.readFileSync(path.join(projectRoot, keyFile), 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed.client_email && parsed.private_key) {
+        return { configured: true, source: `file:${keyFile}`, email: parsed.client_email };
+      }
+      return { configured: false, source: `file:${keyFile}`, error: 'JSON에 client_email 또는 private_key가 없습니다' };
+    }
+  } catch (e: any) {
+    return { configured: false, source: 'file-search', error: `파일 검색 실패: ${e.message}` };
+  }
+
+  return { configured: false, source: 'none', error: '환경변수도 없고, 로컬 JSON 키 파일도 찾을 수 없습니다.' };
 }

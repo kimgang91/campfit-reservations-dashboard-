@@ -160,6 +160,8 @@ export default function CampfitDashboardPage() {
   const [newlyFoundCampgrounds, setNewlyFoundCampgrounds] = useState<string[]>([]);
   const [historyConfigured, setHistoryConfigured] = useState<boolean | null>(null);
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historySource, setHistorySource] = useState<string>(''); // 키 소스 정보
 
   // 기간 선택
   const [changesPeriodType, setChangesPeriodType] = useState<PeriodType>('month');
@@ -198,6 +200,7 @@ export default function CampfitDashboardPage() {
       });
 
       // 3) 서버 이력 연동 시도
+      setHistoryError(null);
       try {
         const histRes = await fetch('/api/campfit-history', {
           method: 'POST',
@@ -206,11 +209,28 @@ export default function CampfitDashboardPage() {
         });
         const histJson = await histRes.json();
 
+        console.log('[Dashboard] History POST response:', JSON.stringify({
+          configured: histJson.configured,
+          error: histJson.error,
+          configStatus: histJson.configStatus,
+          lost: histJson.lost?.length,
+          rejoined: histJson.rejoined?.length,
+          newlyFound: histJson.newlyFound?.length,
+        }));
+
         if (histJson.configured) {
           setHistoryConfigured(true);
+          setHistorySource(histJson.configStatus?.source || '');
           setLostCampgrounds(histJson.lost || []);
           setRejoinedCampgrounds(histJson.rejoined || []);
           setNewlyFoundCampgrounds(histJson.newlyFound || []);
+
+          // ✅ 서버 연동 성공 → localStorage 데이터 삭제
+          try {
+            window.localStorage.removeItem(LS_SNAPSHOT_KEY);
+            window.localStorage.removeItem(LS_HISTORY_KEY);
+            console.log('[Dashboard] localStorage 스냅샷/이력 데이터 삭제 완료 (서버 연동 활성)');
+          } catch {}
 
           // 이력 전체도 가져오기
           const getRes = await fetch('/api/campfit-history');
@@ -219,14 +239,20 @@ export default function CampfitDashboardPage() {
         } else {
           // 서비스 계정 미설정 → localStorage 폴백
           setHistoryConfigured(false);
+          const errMsg = histJson.error || histJson.message || '서버 연동 실패';
+          setHistoryError(errMsg);
+          console.warn('[Dashboard] History not configured:', errMsg, histJson.configStatus);
           const local = localCalculateChurn(uniqueNames);
           setLostCampgrounds(local.lost);
           setRejoinedCampgrounds(local.rejoined);
           setNewlyFoundCampgrounds(local.newlyFound);
         }
-      } catch {
+      } catch (histErr: any) {
         // API 오류 → localStorage 폴백
+        const errMsg = histErr?.message || '이력 API 호출 실패';
+        console.error('[Dashboard] History API error:', errMsg);
         setHistoryConfigured(false);
+        setHistoryError(errMsg);
         const local = localCalculateChurn(uniqueNames);
         setLostCampgrounds(local.lost);
         setRejoinedCampgrounds(local.rejoined);
@@ -493,8 +519,14 @@ export default function CampfitDashboardPage() {
               </h1>
               <p className="text-xs md:text-sm text-gray-500 mt-1">
                 Google Sheets 실시간 연동 · {format(now, 'yyyy.MM.dd HH:mm')}
-                {historyConfigured === true && <span className="ml-2 text-emerald-600 font-semibold">✅ 이력관리 활성</span>}
-                {historyConfigured === false && <span className="ml-2 text-amber-600 font-semibold">⚠️ 이력: 브라우저 저장</span>}
+                {historyConfigured === true && (
+                  <span className="ml-2 text-emerald-600 font-semibold">
+                    ✅ 이력관리 활성{historySource ? ` (${historySource})` : ''}
+                  </span>
+                )}
+                {historyConfigured === false && (
+                  <span className="ml-2 text-amber-600 font-semibold">⚠️ 이력: 브라우저 저장</span>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -792,6 +824,12 @@ export default function CampfitDashboardPage() {
                   현재 이탈/재입점 기록이 브라우저에만 저장되어, 다른 기기에서는 볼 수 없습니다.
                   아래 설정을 완료하면 Google Sheets에 이력이 자동 기록됩니다.
                 </p>
+                {historyError && (
+                  <div className="bg-red-50 rounded-xl p-4 mb-3 border border-red-200">
+                    <p className="text-sm font-bold text-red-800 mb-1">🔍 연동 실패 원인:</p>
+                    <p className="text-sm text-red-700 break-all">{historyError}</p>
+                  </div>
+                )}
                 <div className="bg-white rounded-xl p-4 text-sm text-gray-700 space-y-2">
                   <p className="font-bold">📝 설정 방법:</p>
                   <ol className="list-decimal list-inside space-y-1 pl-2">
@@ -799,8 +837,19 @@ export default function CampfitDashboardPage() {
                     <li>Google Sheets API 활성화</li>
                     <li>서비스 계정 JSON 키 다운로드</li>
                     <li>해당 스프레드시트를 서비스 계정 이메일로 공유 (편집 권한)</li>
-                    <li>Vercel 환경변수에 <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">GOOGLE_SERVICE_ACCOUNT_KEY</code> 추가 (JSON 키 전체)</li>
+                    <li>
+                      <strong>로컬 실행 시:</strong> JSON 키 파일을 프로젝트 루트에 배치 (예: <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">dashboard-*.json</code>)
+                    </li>
+                    <li>
+                      <strong>Vercel 배포 시:</strong> 환경변수 <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">GOOGLE_SERVICE_ACCOUNT_KEY</code>에 JSON 키 전체 입력 후 <strong className="text-red-600">재배포 필수!</strong>
+                    </li>
                   </ol>
+                  <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                    <p className="text-xs text-blue-800">
+                      💡 <strong>Vercel 환경변수 등록 후 반드시 재배포</strong>해야 반영됩니다.
+                      Vercel Dashboard → Deployments → 최근 배포의 &quot;…&quot; → Redeploy 클릭
+                    </p>
+                  </div>
                 </div>
               </section>
             )}

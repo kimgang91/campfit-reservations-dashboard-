@@ -1,11 +1,12 @@
 /**
  * 캠핏 이력관리 API
  *
- * GET  → 이전 스냅샷 + 이력 조회
+ * GET  → 이전 스냅샷 + 이력 조회 + 설정 상태 진단
  * POST → 현재 캠핑장 목록과 비교 → 이탈/재입점/신규 판별 → 기록 → 결과 반환
  *
- * GOOGLE_SERVICE_ACCOUNT_KEY 환경변수가 없으면 configured: false 를 반환하고,
- * 프론트엔드에서 localStorage 폴백을 사용하도록 안내합니다.
+ * 서비스 계정 키 검색 순서:
+ *   1. GOOGLE_SERVICE_ACCOUNT_KEY 환경변수
+ *   2. 프로젝트 루트의 JSON 키 파일 (dashboard-*.json)
  */
 
 import { NextResponse } from 'next/server';
@@ -17,14 +18,18 @@ export const runtime = 'nodejs';
 
 export async function GET() {
   try {
-    const { isConfigured } = await import('@/lib/sheetsApi');
+    const { isConfigured, getConfigStatus } = await import('@/lib/sheetsApi');
+    const configStatus = getConfigStatus();
+
+    console.log('[API] campfit-history GET - config status:', JSON.stringify(configStatus));
 
     if (!isConfigured()) {
       return NextResponse.json({
         configured: false,
         snapshot: [],
         history: [],
-        message: 'GOOGLE_SERVICE_ACCOUNT_KEY 환경변수가 설정되지 않았습니다.',
+        configStatus,
+        message: configStatus.error || '서비스 계정 키를 찾을 수 없습니다.',
       });
     }
 
@@ -35,15 +40,18 @@ export async function GET() {
 
     return NextResponse.json({
       configured: true,
+      configStatus,
       snapshot,
       history,
     });
   } catch (error: any) {
     console.error('[API] campfit-history GET error:', error);
-    return NextResponse.json(
-      { error: error?.message || '이력 조회 중 오류가 발생했습니다.' },
-      { status: 500 },
-    );
+    // 인증 실패 등 구체적 에러도 configured 정보와 함께 반환
+    return NextResponse.json({
+      configured: false,
+      error: error?.message || '이력 조회 중 오류가 발생했습니다.',
+      errorDetail: String(error),
+    }, { status: 500 });
   }
 }
 
@@ -51,7 +59,10 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const { isConfigured } = await import('@/lib/sheetsApi');
+    const { isConfigured, getConfigStatus } = await import('@/lib/sheetsApi');
+    const configStatus = getConfigStatus();
+
+    console.log('[API] campfit-history POST - config status:', JSON.stringify(configStatus));
 
     if (!isConfigured()) {
       return NextResponse.json({
@@ -59,7 +70,8 @@ export async function POST(request: Request) {
         lost: [],
         rejoined: [],
         newlyFound: [],
-        message: 'GOOGLE_SERVICE_ACCOUNT_KEY 환경변수가 설정되지 않았습니다.',
+        configStatus,
+        message: configStatus.error || '서비스 계정 키를 찾을 수 없습니다.',
       });
     }
 
@@ -155,9 +167,13 @@ export async function POST(request: Request) {
     });
   } catch (error: any) {
     console.error('[API] campfit-history POST error:', error);
-    return NextResponse.json(
-      { error: error?.message || '이력 기록 중 오류가 발생했습니다.' },
-      { status: 500 },
-    );
+    return NextResponse.json({
+      configured: false,
+      error: error?.message || '이력 기록 중 오류가 발생했습니다.',
+      errorDetail: String(error),
+      lost: [],
+      rejoined: [],
+      newlyFound: [],
+    }, { status: 500 });
   }
 }
