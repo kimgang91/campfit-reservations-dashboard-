@@ -4,6 +4,20 @@
 
 export type PeriodUnit = 'day' | 'week' | 'month';
 
+// 유형 우선순위 (N열 보유존 타입에서 대표 유형 1개 자동 분류)
+const TYPE_PRIORITY = ['오토캠핑', '글램핑', '카라반', '펜션', '방가로', '차박'] as const;
+export type CampgroundType = (typeof TYPE_PRIORITY)[number] | '기타';
+
+/** N열(보유존 타입)에서 대표 유형 1개를 우선순위 기반으로 추출 */
+export function classifyCampgroundType(zoneType?: string): CampgroundType {
+  if (!zoneType) return '기타';
+  const normalized = zoneType.trim();
+  for (const t of TYPE_PRIORITY) {
+    if (normalized.includes(t)) return t;
+  }
+  return '기타';
+}
+
 // 원시 시트 행을 전처리한 레코드 타입
 export interface CampfitPlanRecord {
   rowNumber: number; // 시트 내 실제 행 번호 (디버깅용)
@@ -17,6 +31,9 @@ export interface CampfitPlanRecord {
   planStartDate?: string | null; // I: 플랜등록일 (ISO YYYY-MM-DD 또는 null)
   planEndDate?: string | null; // J: 플랜취소일 (ISO YYYY-MM-DD 또는 null)
   md?: string; // K: 담당 MD
+  zoneType?: string; // N: 보유존 타입 (원본)
+  campgroundType: CampgroundType; // N에서 파생: 대표 유형
+  grade?: string; // O: 등급
   // 전체 원본 컬럼도 유지 (확장 대비)
   raw: Record<string, string>;
 }
@@ -200,7 +217,7 @@ export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
     console.log('[Campfit] Header row:', headers);
     console.log('[Campfit] Data rows (excluding header):', dataRows.length);
 
-    // B~K 컬럼 인덱스 (0-based)
+    // B~K + N, O 컬럼 인덱스 (0-based)
     const IDX_B = 1; // 캠핑장명
     const IDX_C = 2; // 운영상태
     const IDX_D = 3; // 세부플랜명
@@ -211,6 +228,8 @@ export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
     const IDX_I = 8; // 플랜등록일
     const IDX_J = 9; // 플랜취소일
     const IDX_K = 10; // 담당 MD
+    const IDX_N = 13; // 보유존 타입
+    const IDX_O = 14; // 등급
 
     const records: CampfitPlanRecord[] = [];
 
@@ -232,6 +251,9 @@ export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
       const planStartDate = row[IDX_I] ? toISODate(row[IDX_I]) : null;
       const planEndDate = row[IDX_J] ? toISODate(row[IDX_J]) : null;
       const md = (row[IDX_K] || '').trim() || undefined;
+      const zoneType = (row[IDX_N] || '').trim() || undefined;
+      const grade = (row[IDX_O] || '').trim() || undefined;
+      const campgroundType = classifyCampgroundType(zoneType);
 
       const raw: Record<string, string> = {};
       headers.forEach((h, idx) => {
@@ -252,6 +274,9 @@ export async function getCampfitPlans(): Promise<CampfitPlanRecord[]> {
         planStartDate,
         planEndDate,
         md,
+        zoneType,
+        campgroundType,
+        grade,
         raw,
       });
     });
