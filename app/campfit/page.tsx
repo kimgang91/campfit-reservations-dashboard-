@@ -17,7 +17,18 @@ import {
   Cell,
 } from 'recharts';
 import type { CampfitPlanRecord } from '@/lib/campfitReservations';
-import { parseISO, format, startOfMonth, endOfMonth, isBefore, isAfter, isEqual } from 'date-fns';
+import {
+  parseISO,
+  format,
+  startOfMonth,
+  endOfMonth,
+  startOfWeek,
+  endOfWeek,
+  isBefore,
+  isAfter,
+  addDays,
+  getISOWeek,
+} from 'date-fns';
 
 // ─── 색상 팔레트 ───
 const COLORS = [
@@ -28,6 +39,7 @@ const COLORS = [
 
 // ─── 탭 타입 ───
 type TabKey = 'overview' | 'changes' | 'md';
+type PeriodType = 'week' | 'month';
 
 // ─── 이탈/재입점 스냅샷 키 ───
 const SNAPSHOT_KEY = 'campfit_prev_snapshot_v2';
@@ -101,6 +113,47 @@ function isEnded(row: CampfitPlanRecord): boolean {
   return ps.includes('종료') || ps.includes('취소') || os.includes('중단') || os.includes('종료');
 }
 
+function dateInRange(d: Date, rangeStart: Date, rangeEnd: Date): boolean {
+  return !isBefore(d, rangeStart) && !isAfter(d, rangeEnd);
+}
+
+// 주차의 월요일 기준 키 생성
+function getWeekKey(d: Date): string {
+  const monday = startOfWeek(d, { weekStartsOn: 1 });
+  return format(monday, 'yyyy-MM-dd');
+}
+
+// 월 기준 키 생성
+function getMonthKey(d: Date): string {
+  return format(d, 'yyyy-MM');
+}
+
+// 주차 라벨 (예: "2월 4주차 (02.17~02.23)")
+function getWeekLabel(mondayStr: string): string {
+  const monday = parseISO(mondayStr);
+  const sunday = addDays(monday, 6);
+  const weekNum = getISOWeek(monday);
+  const monthNum = monday.getMonth() + 1;
+  return `${monthNum}월 ${weekNum}주차 (${format(monday, 'MM.dd')}~${format(sunday, 'MM.dd')})`;
+}
+
+// 월 라벨 (예: "2026년 2월")
+function getMonthLabel(monthKey: string): string {
+  const d = parseISO(monthKey + '-01');
+  return format(d, 'yyyy년 M월');
+}
+
+// 선택된 기간의 시작/종료 Date 구하기
+function getPeriodRange(periodType: PeriodType, periodValue: string): { start: Date; end: Date } {
+  if (periodType === 'week') {
+    const monday = parseISO(periodValue);
+    return { start: monday, end: endOfWeek(monday, { weekStartsOn: 1 }) };
+  } else {
+    const d = parseISO(periodValue + '-01');
+    return { start: startOfMonth(d), end: endOfMonth(d) };
+  }
+}
+
 // ─── 메인 컴포넌트 ───
 export default function CampfitDashboardPage() {
   const [data, setData] = useState<CampfitPlanRecord[]>([]);
@@ -109,6 +162,16 @@ export default function CampfitDashboardPage() {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [lostCampgrounds, setLostCampgrounds] = useState<string[]>([]);
   const [rejoinedCampgrounds, setRejoinedCampgrounds] = useState<string[]>([]);
+
+  // 신규/이탈/변경 탭 기간 선택
+  const [changesPeriodType, setChangesPeriodType] = useState<PeriodType>('month');
+  const [changesPeriodValue, setChangesPeriodValue] = useState<string>('');
+
+  // MD별 탭 기간 선택
+  const [mdPeriodType, setMdPeriodType] = useState<PeriodType>('month');
+  const [mdPeriodValue, setMdPeriodValue] = useState<string>('');
+
+  const now = new Date();
 
   // 데이터 로드
   const fetchData = async () => {
@@ -147,18 +210,50 @@ export default function CampfitDashboardPage() {
 
   useEffect(() => { fetchData(); }, []);
 
-  // ───────────── 전체 현황 집계 ─────────────
+  // ─── 기간 옵션 생성 (데이터 기반) ───
 
-  // 1) 전체 등록 건수 (시트 전체 행)
+  // 모든 날짜 추출
+  const allDates = useMemo(() => {
+    const dates: Date[] = [];
+    data.forEach((r) => {
+      const d = parseDate(r.planStartDate);
+      if (d) dates.push(d);
+    });
+    return dates;
+  }, [data]);
+
+  // 사용 가능한 월 옵션
+  const availableMonths = useMemo(() => {
+    const set = new Set<string>();
+    allDates.forEach((d) => set.add(getMonthKey(d)));
+    return [...set].sort().reverse(); // 최신순
+  }, [allDates]);
+
+  // 사용 가능한 주 옵션
+  const availableWeeks = useMemo(() => {
+    const set = new Set<string>();
+    allDates.forEach((d) => set.add(getWeekKey(d)));
+    return [...set].sort().reverse(); // 최신순
+  }, [allDates]);
+
+  // 기본값 설정: 현재 월/주
+  useEffect(() => {
+    const currentMonth = getMonthKey(now);
+    const currentWeek = getWeekKey(now);
+    if (!changesPeriodValue) setChangesPeriodValue(currentMonth);
+    if (!mdPeriodValue) setMdPeriodValue(currentMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  // ───────────── 전체 현황 집계 (운영 현황 탭) ─────────────
+
   const totalRecords = data.length;
 
-  // 2) 전체 캠핑장 수 (고유 캠핑장명)
   const allCampgroundNames = useMemo(() => {
     return [...new Set(data.map((r) => r.campgroundName))];
   }, [data]);
   const totalCampgrounds = allCampgroundNames.length;
 
-  // 3) 정상 운영 건수 / 종료·취소 건수
   const { activeRecords, endedRecords } = useMemo(() => {
     let active = 0;
     let ended = 0;
@@ -169,7 +264,6 @@ export default function CampfitDashboardPage() {
     return { activeRecords: active, endedRecords: ended };
   }, [data]);
 
-  // 4) 운영상태별 현황
   const operateStatusStats = useMemo(() => {
     const map = new Map<string, number>();
     data.forEach((r) => {
@@ -181,7 +275,6 @@ export default function CampfitDashboardPage() {
       .sort((a, b) => b.count - a.count);
   }, [data]);
 
-  // 5) 플랜상태별 현황
   const planStatusStats = useMemo(() => {
     const map = new Map<string, number>();
     data.forEach((r) => {
@@ -193,7 +286,6 @@ export default function CampfitDashboardPage() {
       .sort((a, b) => b.count - a.count);
   }, [data]);
 
-  // 6) 대표플랜별 등록 현황
   const planDistribution = useMemo(() => {
     const map = new Map<string, number>();
     data.forEach((r) => {
@@ -205,32 +297,44 @@ export default function CampfitDashboardPage() {
       .sort((a, b) => b.count - a.count);
   }, [data]);
 
-  // ───────────── 신규 / 이탈 / 변경 현황 ─────────────
+  // ───────────── 신규 / 이탈 / 변경 현황 (기간 필터 적용) ─────────────
 
-  const now = new Date();
-  const thisMonthStart = startOfMonth(now);
-  const thisMonthEnd = endOfMonth(now);
+  // 선택된 기간 범위
+  const changesRange = useMemo(() => {
+    if (!changesPeriodValue) return null;
+    return getPeriodRange(changesPeriodType, changesPeriodValue);
+  }, [changesPeriodType, changesPeriodValue]);
 
-  // 이번달 신규 입점 (플랜등록일이 이번달인 건)
-  const thisMonthNew = useMemo(() => {
+  // 기간 라벨
+  const changesPeriodLabel = useMemo(() => {
+    if (!changesPeriodValue) return '';
+    return changesPeriodType === 'week'
+      ? getWeekLabel(changesPeriodValue)
+      : getMonthLabel(changesPeriodValue);
+  }, [changesPeriodType, changesPeriodValue]);
+
+  // 해당 기간 신규 입점
+  const periodNew = useMemo(() => {
+    if (!changesRange) return [];
     return data.filter((r) => {
       const d = parseDate(r.planStartDate);
       if (!d) return false;
-      return !isBefore(d, thisMonthStart) && !isAfter(d, thisMonthEnd);
+      return dateInRange(d, changesRange.start, changesRange.end);
     });
-  }, [data, thisMonthStart, thisMonthEnd]);
+  }, [data, changesRange]);
 
-  // 이번달 종료 (플랜상태/운영상태가 종료이고, 플랜등록일이 이번달인 건)
-  const thisMonthEnded = useMemo(() => {
+  // 해당 기간 종료
+  const periodEnded = useMemo(() => {
+    if (!changesRange) return [];
     return data.filter((r) => {
       if (!isEnded(r)) return false;
       const d = parseDate(r.planStartDate);
       if (!d) return false;
-      return !isBefore(d, thisMonthStart) && !isAfter(d, thisMonthEnd);
+      return dateInRange(d, changesRange.start, changesRange.end);
     });
-  }, [data, thisMonthStart, thisMonthEnd]);
+  }, [data, changesRange]);
 
-  // 플랜 변경 이벤트 (같은 캠핑장, 다른 세부플랜)
+  // 플랜 변경 이벤트 (전체)
   const planChangeEvents = useMemo(() => {
     const byCampground = new Map<string, CampfitPlanRecord[]>();
     data.forEach((r) => {
@@ -266,31 +370,62 @@ export default function CampfitDashboardPage() {
     return changes;
   }, [data]);
 
-  // 월별 신규 입점 추이 (최근 12개월)
-  const monthlyNewTrend = useMemo(() => {
+  // 해당 기간 플랜 변경
+  const periodPlanChanges = useMemo(() => {
+    if (!changesRange) return planChangeEvents;
+    return planChangeEvents.filter((ev) => {
+      const d = parseDate(ev.date);
+      if (!d) return false;
+      return dateInRange(d, changesRange.start, changesRange.end);
+    });
+  }, [planChangeEvents, changesRange]);
+
+  // 월별/주별 신규 입점 추이 (차트용)
+  const newTrend = useMemo(() => {
     const map = new Map<string, number>();
     data.forEach((r) => {
       const d = parseDate(r.planStartDate);
       if (!d) return;
-      const key = format(d, 'yyyy-MM');
+      const key = changesPeriodType === 'week' ? getWeekKey(d) : getMonthKey(d);
       map.set(key, (map.get(key) ?? 0) + 1);
     });
-    return [...map.entries()]
-      .map(([month, count]) => ({ month, count }))
-      .sort((a, b) => a.month.localeCompare(b.month))
-      .slice(-12); // 최근 12개월
-  }, [data]);
 
-  // ───────────── MD별 현황 ─────────────
+    const entries = [...map.entries()]
+      .map(([period, count]) => ({
+        period,
+        label: changesPeriodType === 'week'
+          ? format(parseISO(period), 'MM.dd') + '~'
+          : period,
+        count,
+      }))
+      .sort((a, b) => a.period.localeCompare(b.period));
+
+    // 최근 12개 항목만
+    return entries.slice(-12);
+  }, [data, changesPeriodType]);
+
+  // ───────────── MD별 현황 (기간 필터 적용) ─────────────
+
+  const mdRange = useMemo(() => {
+    if (!mdPeriodValue) return null;
+    return getPeriodRange(mdPeriodType, mdPeriodValue);
+  }, [mdPeriodType, mdPeriodValue]);
+
+  const mdPeriodLabel = useMemo(() => {
+    if (!mdPeriodValue) return '';
+    return mdPeriodType === 'week'
+      ? getWeekLabel(mdPeriodValue)
+      : getMonthLabel(mdPeriodValue);
+  }, [mdPeriodType, mdPeriodValue]);
 
   const mdOverview = useMemo(() => {
     const map = new Map<string, {
       md: string;
-      totalCount: number;      // 전체 담당 건수
-      activeCount: number;      // 정상 운영 건수
-      endedCount: number;       // 종료 건수
-      thisMonthNew: number;     // 이번달 신규
-      campgrounds: Set<string>; // 고유 캠핑장
+      totalCount: number;
+      activeCount: number;
+      endedCount: number;
+      periodNew: number;
+      campgrounds: Set<string>;
     }>();
 
     data.forEach((r) => {
@@ -301,7 +436,7 @@ export default function CampfitDashboardPage() {
           totalCount: 0,
           activeCount: 0,
           endedCount: 0,
-          thisMonthNew: 0,
+          periodNew: 0,
           campgrounds: new Set(),
         });
       }
@@ -315,9 +450,12 @@ export default function CampfitDashboardPage() {
         stat.activeCount += 1;
       }
 
-      const d = parseDate(r.planStartDate);
-      if (d && !isBefore(d, thisMonthStart) && !isAfter(d, thisMonthEnd)) {
-        stat.thisMonthNew += 1;
+      // 선택된 기간 내 신규
+      if (mdRange) {
+        const d = parseDate(r.planStartDate);
+        if (d && dateInRange(d, mdRange.start, mdRange.end)) {
+          stat.periodNew += 1;
+        }
       }
     });
 
@@ -327,21 +465,24 @@ export default function CampfitDashboardPage() {
         totalCount: s.totalCount,
         activeCount: s.activeCount,
         endedCount: s.endedCount,
-        thisMonthNew: s.thisMonthNew,
+        periodNew: s.periodNew,
         campgroundCount: s.campgrounds.size,
       }))
       .sort((a, b) => b.totalCount - a.totalCount);
-  }, [data, thisMonthStart, thisMonthEnd]);
+  }, [data, mdRange]);
 
-  // MD별 이번달 신규 입점 Top 10 (차트용)
+  // MD별 해당 기간 신규 입점 Top 10 (차트용)
   const mdNewChart = useMemo(() => {
     return mdOverview
-      .filter((m) => m.thisMonthNew > 0)
-      .sort((a, b) => b.thisMonthNew - a.thisMonthNew)
+      .filter((m) => m.periodNew > 0)
+      .sort((a, b) => b.periodNew - a.periodNew)
       .slice(0, 10);
   }, [mdOverview]);
 
-  const topMd = mdOverview.length > 0 ? mdOverview.sort((a, b) => b.thisMonthNew - a.thisMonthNew)[0] : null;
+  const topMd = useMemo(() => {
+    if (mdOverview.length === 0) return null;
+    return [...mdOverview].sort((a, b) => b.periodNew - a.periodNew)[0];
+  }, [mdOverview]);
 
   // ───────────── 로딩/에러 ─────────────
 
@@ -437,41 +578,16 @@ export default function CampfitDashboardPage() {
             ════════════════════════════════════════════════════ */}
         {activeTab === 'overview' && (
           <>
-            {/* KPI 카드 4개 */}
             <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <KPICard
-                label="전체 등록 건수"
-                value={totalRecords.toLocaleString()}
-                sub="시트 전체 행 수"
-                gradient="from-blue-500 to-indigo-600"
-              />
-              <KPICard
-                label="등록 캠핑장 수"
-                sub="고유 캠핑장명 기준"
-                value={totalCampgrounds.toLocaleString()}
-                gradient="from-emerald-500 to-teal-600"
-              />
-              <KPICard
-                label="정상 운영"
-                value={activeRecords.toLocaleString()}
-                sub={`전체의 ${totalRecords ? ((activeRecords / totalRecords) * 100).toFixed(1) : 0}%`}
-                gradient="from-cyan-500 to-blue-600"
-              />
-              <KPICard
-                label="종료 / 취소"
-                value={endedRecords.toLocaleString()}
-                sub={`전체의 ${totalRecords ? ((endedRecords / totalRecords) * 100).toFixed(1) : 0}%`}
-                gradient="from-rose-500 to-pink-600"
-              />
+              <KPICard label="전체 등록 건수" value={totalRecords.toLocaleString()} sub="시트 전체 행 수" gradient="from-blue-500 to-indigo-600" />
+              <KPICard label="등록 캠핑장 수" value={totalCampgrounds.toLocaleString()} sub="고유 캠핑장명 기준" gradient="from-emerald-500 to-teal-600" />
+              <KPICard label="정상 운영" value={activeRecords.toLocaleString()} sub={`전체의 ${totalRecords ? ((activeRecords / totalRecords) * 100).toFixed(1) : 0}%`} gradient="from-cyan-500 to-blue-600" />
+              <KPICard label="종료 / 취소" value={endedRecords.toLocaleString()} sub={`전체의 ${totalRecords ? ((endedRecords / totalRecords) * 100).toFixed(1) : 0}%`} gradient="from-rose-500 to-pink-600" />
             </section>
 
-            {/* 대표플랜별 등록 현황 */}
             <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* 대표플랜 테이블 */}
               <div className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
-                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                  📋 대표플랜별 등록 현황
-                </h2>
+                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">📋 대표플랜별 등록 현황</h2>
                 <div className="max-h-[400px] overflow-auto">
                   <table className="w-full text-sm">
                     <thead className="bg-gray-50 sticky top-0">
@@ -485,16 +601,11 @@ export default function CampfitDashboardPage() {
                       {planDistribution.map((item, i) => (
                         <tr key={item.plan} className="border-t border-gray-100 hover:bg-blue-50/50 transition-colors">
                           <td className="px-4 py-3 font-medium text-gray-800 flex items-center gap-2">
-                            <span
-                              className="w-3 h-3 rounded-full inline-block"
-                              style={{ backgroundColor: COLORS[i % COLORS.length] }}
-                            />
+                            <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
                             {item.plan}
                           </td>
                           <td className="px-4 py-3 text-right font-bold text-gray-900">{item.count.toLocaleString()}</td>
-                          <td className="px-4 py-3 text-right text-gray-600">
-                            {totalRecords ? ((item.count / totalRecords) * 100).toFixed(1) : 0}%
-                          </td>
+                          <td className="px-4 py-3 text-right text-gray-600">{totalRecords ? ((item.count / totalRecords) * 100).toFixed(1) : 0}%</td>
                         </tr>
                       ))}
                     </tbody>
@@ -502,11 +613,8 @@ export default function CampfitDashboardPage() {
                 </div>
               </div>
 
-              {/* 대표플랜 도넛 차트 */}
               <div className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
-                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                  🥧 대표플랜 비율
-                </h2>
+                <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">🥧 대표플랜 비율</h2>
                 <div className="h-[400px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
@@ -538,13 +646,11 @@ export default function CampfitDashboardPage() {
               </div>
             </section>
 
-            {/* 운영상태 / 플랜상태 분포 */}
             <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <StatusTable title="🏢 운영상태별 분포" data={operateStatusStats} total={totalRecords} />
               <StatusTable title="📄 플랜상태별 분포" data={planStatusStats} total={totalRecords} />
             </section>
 
-            {/* 전체 데이터 테이블 */}
             <DataTable data={data} title="전체 캠핑장 / 플랜 리스트" />
           </>
         )}
@@ -554,12 +660,31 @@ export default function CampfitDashboardPage() {
             ════════════════════════════════════════════════════ */}
         {activeTab === 'changes' && (
           <>
+            {/* 기간 선택 바 */}
+            <PeriodSelector
+              periodType={changesPeriodType}
+              periodValue={changesPeriodValue}
+              availableMonths={availableMonths}
+              availableWeeks={availableWeeks}
+              onTypeChange={(t) => {
+                setChangesPeriodType(t);
+                // 타입 변경 시 기본값 설정
+                if (t === 'week') {
+                  setChangesPeriodValue(availableWeeks[0] || getWeekKey(now));
+                } else {
+                  setChangesPeriodValue(availableMonths[0] || getMonthKey(now));
+                }
+              }}
+              onValueChange={setChangesPeriodValue}
+              label={changesPeriodLabel}
+            />
+
             {/* KPI 카드 */}
             <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <KPICard
-                label={`이번달 신규 입점 (${format(now, 'M')}월)`}
-                value={thisMonthNew.length.toLocaleString()}
-                sub="플랜등록일 기준"
+                label={`신규 입점`}
+                value={periodNew.length.toLocaleString()}
+                sub={`${changesPeriodLabel} · 플랜등록일 기준`}
                 gradient="from-emerald-500 to-green-600"
               />
               <KPICard
@@ -575,23 +700,23 @@ export default function CampfitDashboardPage() {
                 gradient="from-amber-500 to-orange-600"
               />
               <KPICard
-                label="플랜 변경 건수"
-                value={planChangeEvents.length.toLocaleString()}
-                sub="동일 캠핑장, 다른 플랜"
+                label="플랜 변경"
+                value={periodPlanChanges.length.toLocaleString()}
+                sub={`${changesPeriodLabel} 기준`}
                 gradient="from-purple-500 to-violet-600"
               />
             </section>
 
-            {/* 월별 신규 입점 추이 */}
+            {/* 신규 입점 추이 차트 */}
             <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                📈 월별 신규 입점 추이
+                📈 {changesPeriodType === 'week' ? '주별' : '월별'} 신규 입점 추이
               </h2>
               <div className="h-72 md:h-80">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={monthlyNewTrend}>
+                  <BarChart data={newTrend}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                    <XAxis dataKey="label" tick={{ fontSize: 10 }} angle={changesPeriodType === 'week' ? -30 : 0} textAnchor={changesPeriodType === 'week' ? 'end' : 'middle'} height={changesPeriodType === 'week' ? 60 : 30} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip
                       formatter={(value: number) => [value.toLocaleString() + '건', '신규 입점']}
@@ -603,13 +728,13 @@ export default function CampfitDashboardPage() {
               </div>
             </section>
 
-            {/* 이번달 신규 입점 목록 */}
+            {/* 해당 기간 신규 입점 목록 */}
             <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                🆕 이번달 신규 입점 ({format(now, 'yyyy년 M월')}) — {thisMonthNew.length}건
+                🆕 {changesPeriodLabel} 신규 입점 — {periodNew.length}건
               </h2>
-              {thisMonthNew.length === 0 ? (
-                <p className="text-gray-500 text-sm">이번달 신규 입점 데이터가 없습니다.</p>
+              {periodNew.length === 0 ? (
+                <p className="text-gray-500 text-sm">해당 기간에 신규 입점 데이터가 없습니다.</p>
               ) : (
                 <div className="max-h-[300px] overflow-auto">
                   <table className="w-full text-sm">
@@ -623,7 +748,7 @@ export default function CampfitDashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {thisMonthNew.map((r) => (
+                      {periodNew.map((r) => (
                         <tr key={r.rowNumber} className="border-t border-gray-100 hover:bg-emerald-50/50">
                           <td className="px-4 py-2 font-medium">{r.campgroundName}</td>
                           <td className="px-4 py-2">{r.mainPlanName || '-'}</td>
@@ -652,9 +777,7 @@ export default function CampfitDashboardPage() {
                 ) : (
                   <ul className="max-h-[250px] overflow-auto text-sm space-y-1">
                     {lostCampgrounds.map((name) => (
-                      <li key={name} className="px-3 py-2 bg-red-50 rounded-lg text-gray-800">
-                        {name}
-                      </li>
+                      <li key={name} className="px-3 py-2 bg-red-50 rounded-lg text-gray-800">{name}</li>
                     ))}
                   </ul>
                 )}
@@ -675,9 +798,7 @@ export default function CampfitDashboardPage() {
                 ) : (
                   <ul className="max-h-[250px] overflow-auto text-sm space-y-1">
                     {rejoinedCampgrounds.map((name) => (
-                      <li key={name} className="px-3 py-2 bg-emerald-50 rounded-lg text-gray-800">
-                        {name}
-                      </li>
+                      <li key={name} className="px-3 py-2 bg-emerald-50 rounded-lg text-gray-800">{name}</li>
                     ))}
                   </ul>
                 )}
@@ -690,10 +811,10 @@ export default function CampfitDashboardPage() {
             {/* 플랜 변경 내역 */}
             <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                🔄 플랜 변경 내역 — {planChangeEvents.length}건
+                🔄 {changesPeriodLabel} 플랜 변경 내역 — {periodPlanChanges.length}건
               </h2>
-              {planChangeEvents.length === 0 ? (
-                <p className="text-gray-500 text-sm">플랜 변경 이력이 없습니다.</p>
+              {periodPlanChanges.length === 0 ? (
+                <p className="text-gray-500 text-sm">해당 기간에 플랜 변경 이력이 없습니다.</p>
               ) : (
                 <div className="max-h-[300px] overflow-auto">
                   <table className="w-full text-sm">
@@ -707,7 +828,7 @@ export default function CampfitDashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {planChangeEvents.map((ev, i) => (
+                      {periodPlanChanges.map((ev, i) => (
                         <tr key={i} className="border-t border-gray-100 hover:bg-purple-50/50">
                           <td className="px-4 py-2 font-medium">{ev.campground}</td>
                           <td className="px-4 py-2 text-red-600">{ev.fromPlan}</td>
@@ -729,6 +850,24 @@ export default function CampfitDashboardPage() {
             ════════════════════════════════════════════════════ */}
         {activeTab === 'md' && (
           <>
+            {/* 기간 선택 바 */}
+            <PeriodSelector
+              periodType={mdPeriodType}
+              periodValue={mdPeriodValue}
+              availableMonths={availableMonths}
+              availableWeeks={availableWeeks}
+              onTypeChange={(t) => {
+                setMdPeriodType(t);
+                if (t === 'week') {
+                  setMdPeriodValue(availableWeeks[0] || getWeekKey(now));
+                } else {
+                  setMdPeriodValue(availableMonths[0] || getMonthKey(now));
+                }
+              }}
+              onValueChange={setMdPeriodValue}
+              label={mdPeriodLabel}
+            />
+
             {/* MD Top 요약 */}
             <section className="grid grid-cols-2 lg:grid-cols-3 gap-4">
               <KPICard
@@ -738,9 +877,9 @@ export default function CampfitDashboardPage() {
                 gradient="from-blue-500 to-indigo-600"
               />
               <KPICard
-                label={`이번달 신규 입점 1위`}
+                label={`${mdPeriodLabel} 신규 1위`}
                 value={topMd?.md || '-'}
-                sub={topMd ? `${topMd.thisMonthNew}건 입점` : ''}
+                sub={topMd && topMd.periodNew > 0 ? `${topMd.periodNew}건 입점` : '해당 기간 신규 없음'}
                 gradient="from-amber-500 to-orange-600"
               />
               <KPICard
@@ -751,11 +890,11 @@ export default function CampfitDashboardPage() {
               />
             </section>
 
-            {/* MD별 이번달 신규 입점 차트 */}
+            {/* MD별 해당 기간 신규 입점 차트 */}
             {mdNewChart.length > 0 && (
               <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
                 <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                  🏆 이번달 MD별 신규 입점 Top 10
+                  🏆 {mdPeriodLabel} MD별 신규 입점 Top 10
                 </h2>
                 <div className="h-72 md:h-80">
                   <ResponsiveContainer width="100%" height="100%">
@@ -764,10 +903,10 @@ export default function CampfitDashboardPage() {
                       <XAxis type="number" tick={{ fontSize: 11 }} />
                       <YAxis dataKey="md" type="category" tick={{ fontSize: 11 }} width={80} />
                       <Tooltip
-                        formatter={(value: number) => [value.toLocaleString() + '건', '이번달 신규']}
+                        formatter={(value: number) => [value.toLocaleString() + '건', '신규 입점']}
                         contentStyle={{ borderRadius: '12px', border: '1px solid #e5e7eb' }}
                       />
-                      <Bar dataKey="thisMonthNew" name="이번달 신규" fill="#22c55e" radius={[0, 6, 6, 0]} />
+                      <Bar dataKey="periodNew" name="신규 입점" fill="#22c55e" radius={[0, 6, 6, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
@@ -789,7 +928,9 @@ export default function CampfitDashboardPage() {
                       <th className="text-right px-4 py-3 font-semibold text-indigo-800">전체 건수</th>
                       <th className="text-right px-4 py-3 font-semibold text-indigo-800">정상 운영</th>
                       <th className="text-right px-4 py-3 font-semibold text-indigo-800">종료/취소</th>
-                      <th className="text-right px-4 py-3 font-semibold text-indigo-800">이번달 신규</th>
+                      <th className="text-right px-4 py-3 font-semibold text-indigo-800">
+                        {mdPeriodLabel} 신규
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -802,12 +943,13 @@ export default function CampfitDashboardPage() {
                         <td className="px-4 py-3 text-right text-emerald-600 font-medium">{m.activeCount.toLocaleString()}</td>
                         <td className="px-4 py-3 text-right text-red-600 font-medium">{m.endedCount.toLocaleString()}</td>
                         <td className="px-4 py-3 text-right">
-                          {m.thisMonthNew > 0 && (
+                          {m.periodNew > 0 ? (
                             <span className="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">
-                              +{m.thisMonthNew}
+                              +{m.periodNew}
                             </span>
+                          ) : (
+                            <span className="text-gray-400">-</span>
                           )}
-                          {m.thisMonthNew === 0 && <span className="text-gray-400">-</span>}
                         </td>
                       </tr>
                     ))}
@@ -822,23 +964,83 @@ export default function CampfitDashboardPage() {
   );
 }
 
-// ─── 서브 컴포넌트 ───
+// ═══════════════════════════════════════════════
+// 서브 컴포넌트
+// ═══════════════════════════════════════════════
 
-function KPICard({
+// ─── 기간 선택 바 ───
+function PeriodSelector({
+  periodType,
+  periodValue,
+  availableMonths,
+  availableWeeks,
+  onTypeChange,
+  onValueChange,
   label,
-  value,
-  sub,
-  gradient,
 }: {
+  periodType: PeriodType;
+  periodValue: string;
+  availableMonths: string[];
+  availableWeeks: string[];
+  onTypeChange: (t: PeriodType) => void;
+  onValueChange: (v: string) => void;
   label: string;
-  value: string;
-  sub?: string;
-  gradient: string;
 }) {
+  const options = periodType === 'week' ? availableWeeks : availableMonths;
+
   return (
-    <div
-      className={`bg-gradient-to-br ${gradient} text-white rounded-2xl shadow-lg p-5 transform hover:scale-[1.02] transition-all`}
-    >
+    <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-4 md:p-5">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+        {/* 주간/월간 토글 */}
+        <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
+          <button
+            onClick={() => onTypeChange('week')}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+              periodType === 'week'
+                ? 'bg-indigo-600 text-white shadow'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            📅 주간
+          </button>
+          <button
+            onClick={() => onTypeChange('month')}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+              periodType === 'month'
+                ? 'bg-indigo-600 text-white shadow'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            🗓️ 월간
+          </button>
+        </div>
+
+        {/* 기간 드롭다운 */}
+        <div className="flex items-center gap-3 flex-1">
+          <select
+            value={periodValue}
+            onChange={(e) => onValueChange(e.target.value)}
+            className="px-4 py-2.5 border-2 border-gray-300 rounded-xl text-sm font-medium focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 min-w-[200px]"
+          >
+            {options.map((opt) => (
+              <option key={opt} value={opt}>
+                {periodType === 'week' ? getWeekLabel(opt) : getMonthLabel(opt)}
+              </option>
+            ))}
+          </select>
+          <span className="text-sm text-indigo-600 font-bold hidden sm:block">
+            선택: {label}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ─── KPI 카드 ───
+function KPICard({ label, value, sub, gradient }: { label: string; value: string; sub?: string; gradient: string }) {
+  return (
+    <div className={`bg-gradient-to-br ${gradient} text-white rounded-2xl shadow-lg p-5 transform hover:scale-[1.02] transition-all`}>
       <div className="text-xs md:text-sm font-medium text-white/80 mb-1">{label}</div>
       <div className="text-2xl md:text-3xl font-extrabold truncate">{value}</div>
       {sub && <div className="text-[11px] md:text-xs text-white/70 mt-1">{sub}</div>}
@@ -846,15 +1048,8 @@ function KPICard({
   );
 }
 
-function StatusTable({
-  title,
-  data,
-  total,
-}: {
-  title: string;
-  data: { name: string; count: number }[];
-  total: number;
-}) {
+// ─── 상태 분포 테이블 ───
+function StatusTable({ title, data, total }: { title: string; data: { name: string; count: number }[]; total: number }) {
   return (
     <div className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
       <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">{title}</h2>
@@ -865,15 +1060,10 @@ function StatusTable({
             <div key={item.name}>
               <div className="flex justify-between text-sm mb-1">
                 <span className="font-medium text-gray-700">{item.name}</span>
-                <span className="text-gray-600">
-                  {item.count.toLocaleString()}건 ({pct.toFixed(1)}%)
-                </span>
+                <span className="text-gray-600">{item.count.toLocaleString()}건 ({pct.toFixed(1)}%)</span>
               </div>
               <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full transition-all"
-                  style={{ width: `${Math.min(pct, 100)}%` }}
-                />
+                <div className="h-full bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full transition-all" style={{ width: `${Math.min(pct, 100)}%` }} />
               </div>
             </div>
           );
@@ -883,6 +1073,7 @@ function StatusTable({
   );
 }
 
+// ─── 데이터 테이블 ───
 function DataTable({ data, title }: { data: CampfitPlanRecord[]; title: string }) {
   const [search, setSearch] = useState('');
 
@@ -931,32 +1122,21 @@ function DataTable({ data, title }: { data: CampfitPlanRecord[]; title: string }
           </thead>
           <tbody>
             {filtered.length === 0 ? (
-              <tr>
-                <td colSpan={11} className="px-4 py-8 text-center text-gray-500">
-                  검색 결과가 없습니다.
-                </td>
-              </tr>
+              <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-500">검색 결과가 없습니다.</td></tr>
             ) : (
               filtered.map((row) => {
                 const ended = row.planStatus?.includes('종료') || row.planStatus?.includes('취소') ||
                   row.operateStatus?.includes('중단') || row.operateStatus?.includes('종료');
                 return (
-                  <tr
-                    key={row.rowNumber}
-                    className={`border-b transition-colors ${ended ? 'bg-red-50/50 hover:bg-red-100/50' : 'hover:bg-blue-50/30'}`}
-                  >
+                  <tr key={row.rowNumber} className={`border-b transition-colors ${ended ? 'bg-red-50/50 hover:bg-red-100/50' : 'hover:bg-blue-50/30'}`}>
                     <td className="px-3 py-2 text-gray-400">{row.rowNumber}</td>
                     <td className="px-3 py-2 font-bold text-gray-900">{row.campgroundName}</td>
-                    <td className="px-3 py-2">
-                      <StatusBadge value={row.operateStatus} type="operate" />
-                    </td>
+                    <td className="px-3 py-2"><StatusBadge value={row.operateStatus} type="operate" /></td>
                     <td className="px-3 py-2 text-gray-700 hidden md:table-cell">{row.detailPlanName || '-'}</td>
                     <td className="px-3 py-2 text-gray-700">{row.mainPlanName || '-'}</td>
                     <td className="px-3 py-2 text-gray-600 hidden lg:table-cell">{row.bundleSubType || '-'}</td>
                     <td className="px-3 py-2 text-gray-600 hidden lg:table-cell">{row.easyCamping || '-'}</td>
-                    <td className="px-3 py-2">
-                      <StatusBadge value={row.planStatus} type="plan" />
-                    </td>
+                    <td className="px-3 py-2"><StatusBadge value={row.planStatus} type="plan" /></td>
                     <td className="px-3 py-2 text-gray-700">{row.planStartDate || '-'}</td>
                     <td className="px-3 py-2 text-gray-700 hidden md:table-cell">{row.planEndDate || '-'}</td>
                     <td className="px-3 py-2 text-gray-800 font-medium">{row.md || '-'}</td>
@@ -971,28 +1151,19 @@ function DataTable({ data, title }: { data: CampfitPlanRecord[]; title: string }
   );
 }
 
+// ─── 상태 뱃지 ───
 function StatusBadge({ value, type }: { value?: string; type: 'operate' | 'plan' }) {
   if (!value) return <span className="text-gray-400">-</span>;
 
-  const isGood =
-    type === 'operate'
-      ? value.includes('운영') || value.includes('정상')
-      : value.includes('정상') || value.includes('사용');
+  const isGood = type === 'operate'
+    ? value.includes('운영') || value.includes('정상')
+    : value.includes('정상') || value.includes('사용');
 
-  const isBad =
-    type === 'operate'
-      ? value.includes('중단') || value.includes('종료')
-      : value.includes('종료') || value.includes('취소');
+  const isBad = type === 'operate'
+    ? value.includes('중단') || value.includes('종료')
+    : value.includes('종료') || value.includes('취소');
 
-  const cls = isGood
-    ? 'bg-emerald-100 text-emerald-700'
-    : isBad
-      ? 'bg-red-100 text-red-700'
-      : 'bg-gray-100 text-gray-700';
+  const cls = isGood ? 'bg-emerald-100 text-emerald-700' : isBad ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700';
 
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-semibold ${cls}`}>
-      {value}
-    </span>
-  );
+  return <span className={`px-2 py-1 rounded-full text-xs font-semibold ${cls}`}>{value}</span>;
 }
