@@ -188,7 +188,7 @@ export async function writeSnapshot(names: string[]): Promise<void> {
 
 export interface HistoryEvent {
   campground: string;
-  type: '신규발견' | '이탈' | '재입점';
+  type: '이탈' | '재입점';
   md?: string;
   note?: string;
 }
@@ -254,6 +254,30 @@ export async function readHistory(): Promise<HistoryRecord[]> {
     }
     throw error;
   }
+}
+
+// ─── 이력 초기화 (스냅샷 + 이력 시트 전체 삭제) ───
+
+export async function clearAllHistory(): Promise<void> {
+  const sheets = await getSheetsClient();
+
+  // 스냅샷 시트 클리어
+  try {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${SNAPSHOT_SHEET}'!A:A`,
+    });
+  } catch { /* 시트 없을 수 있음 */ }
+
+  // 이력관리 시트: 헤더만 남기고 나머지 삭제
+  try {
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `'${HISTORY_SHEET}'!A2:E`,
+    });
+  } catch { /* 시트 없을 수 있음 */ }
+
+  console.log('[SheetsAPI] 스냅샷 + 이력 초기화 완료');
 }
 
 // ─── 서비스 계정 설정 여부 확인 ───

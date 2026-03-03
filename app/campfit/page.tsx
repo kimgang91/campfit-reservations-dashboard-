@@ -5,7 +5,8 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
-  Legend,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -13,8 +14,10 @@ import {
   XAxis,
   YAxis,
   Cell,
+  Legend,
 } from 'recharts';
 import type { CampfitPlanRecord, CampgroundType } from '@/lib/campfitReservations';
+import type { TransactionData, TransactionSection, YearlyMonthlyData } from '@/lib/campfitTransactions';
 import {
   parseISO,
   format,
@@ -43,7 +46,7 @@ const GRADE_COLORS: Record<string, string> = {
   'S': '#ef4444', 'A': '#f97316', 'B': '#eab308', 'C': '#22c55e', 'D': '#06b6d4',
 };
 
-type TabKey = 'overview' | 'changes' | 'md';
+type TabKey = 'overview' | 'changes' | 'md' | 'transactions';
 type PeriodType = 'week' | 'month';
 
 // ─── 이력 타입 ───
@@ -53,18 +56,18 @@ interface HistoryRecord { date: string; campground: string; type: string; md: st
 const LS_SNAPSHOT_KEY = 'campfit_prev_snapshot_v3';
 const LS_HISTORY_KEY = 'campfit_history_v3';
 
-function localCalculateChurn(currentNames: string[]): { lost: string[]; rejoined: string[]; newlyFound: string[] } {
-  if (typeof window === 'undefined') return { lost: [], rejoined: [], newlyFound: [] };
+function localCalculateChurn(currentNames: string[]): { lost: string[]; rejoined: string[] } {
+  if (typeof window === 'undefined') return { lost: [], rejoined: [] };
   let prevNames: string[] = [];
   let everChurned: string[] = [];
   try { const raw = window.localStorage.getItem(LS_SNAPSHOT_KEY); if (raw) prevNames = JSON.parse(raw); } catch { prevNames = []; }
   try { const raw = window.localStorage.getItem(LS_HISTORY_KEY); if (raw) everChurned = JSON.parse(raw); } catch { everChurned = []; }
   const prevSet = new Set(prevNames); const currSet = new Set(currentNames); const churnedSet = new Set(everChurned);
-  const lost: string[] = []; const rejoined: string[] = []; const newlyFound: string[] = [];
+  const lost: string[] = []; const rejoined: string[] = [];
   prevSet.forEach((name) => { if (!currSet.has(name)) { lost.push(name); churnedSet.add(name); } });
-  currSet.forEach((name) => { if (!prevSet.has(name)) { if (churnedSet.has(name)) rejoined.push(name); else if (prevNames.length > 0) newlyFound.push(name); } });
+  currSet.forEach((name) => { if (!prevSet.has(name) && churnedSet.has(name)) rejoined.push(name); });
   try { window.localStorage.setItem(LS_SNAPSHOT_KEY, JSON.stringify(currentNames)); window.localStorage.setItem(LS_HISTORY_KEY, JSON.stringify([...churnedSet])); } catch {}
-  return { lost, rejoined, newlyFound };
+  return { lost, rejoined };
 }
 
 // ─── 유틸리티 ───
@@ -97,6 +100,15 @@ function getPeriodRange(periodType: PeriodType, periodValue: string): { start: D
   return { start: startOfMonth(d), end: endOfMonth(d) };
 }
 
+/** 이력 날짜시간 문자열(YYYY-MM-DD HH:mm:ss)을 Date로 파싱 */
+function parseHistoryDate(dateStr: string): Date | null {
+  if (!dateStr) return null;
+  try {
+    const trimmed = dateStr.trim().split(' ')[0]; // YYYY-MM-DD 부분만
+    return parseISO(trimmed);
+  } catch { return null; }
+}
+
 // ─── 집계 헬퍼 ───
 function countByKey<T>(items: T[], keyFn: (item: T) => string): { name: string; count: number }[] {
   const map = new Map<string, number>();
@@ -113,14 +125,47 @@ export default function CampfitDashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
 
-  // 이탈/재입점/신규발견
+  // ─── 상세 리스트 모달 ───
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalTitle, setModalTitle] = useState('');
+  const [modalColor, setModalColor] = useState<'emerald' | 'purple' | 'red' | 'amber'>('emerald');
+  const [modalRecords, setModalRecords] = useState<CampfitPlanRecord[]>([]);
+  const [modalNames, setModalNames] = useState<string[]>([]); // 이탈/재입점용 (이름만)
+  const [modalMode, setModalMode] = useState<'records' | 'names'>('records');
+
+  const openDetailModal = useCallback((
+    title: string,
+    color: 'emerald' | 'purple' | 'red' | 'amber',
+    records?: CampfitPlanRecord[],
+    names?: string[],
+  ) => {
+    setModalTitle(title);
+    setModalColor(color);
+    if (records) {
+      setModalRecords(records);
+      setModalNames([]);
+      setModalMode('records');
+    } else if (names) {
+      setModalNames(names);
+      setModalRecords([]);
+      setModalMode('names');
+    }
+    setModalOpen(true);
+  }, []);
+
+  // 거래액/매출
+  const [txData, setTxData] = useState<TransactionData | null>(null);
+  const [txLoading, setTxLoading] = useState(false);
+  const [txError, setTxError] = useState<string | null>(null);
+
+  // 이탈/재입점
   const [lostCampgrounds, setLostCampgrounds] = useState<string[]>([]);
   const [rejoinedCampgrounds, setRejoinedCampgrounds] = useState<string[]>([]);
-  const [newlyFoundCampgrounds, setNewlyFoundCampgrounds] = useState<string[]>([]);
   const [historyConfigured, setHistoryConfigured] = useState<boolean | null>(null);
   const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historySource, setHistorySource] = useState<string>('');
+  const [resetting, setResetting] = useState(false);
 
   // 기간 선택
   const [changesPeriodType, setChangesPeriodType] = useState<PeriodType>('month');
@@ -128,23 +173,79 @@ export default function CampfitDashboardPage() {
   const [mdPeriodType, setMdPeriodType] = useState<PeriodType>('month');
   const [mdPeriodValue, setMdPeriodValue] = useState<string>('');
 
+  // 이탈/재입점 기간 선택
+  const [churnPeriodType, setChurnPeriodType] = useState<PeriodType>('month');
+  const [churnPeriodValue, setChurnPeriodValue] = useState<string>('');
+
   // 필터: 유형 & 등급
   const [filterType, setFilterType] = useState<string>('전체');
   const [filterGrade, setFilterGrade] = useState<string>('전체');
 
   const now = new Date();
 
-  // ─── 데이터 로드 + 이력 비교 ───
-  const fetchData = useCallback(async () => {
+  // ─── 시트 데이터만 가져오기 (초기 로드용) ───
+  const loadSheetData = useCallback(async (): Promise<CampfitPlanRecord[]> => {
+    const ts = Date.now();
+    const res = await fetch(`/api/campfit-reservations?t=${ts}`, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' } });
+    if (!res.ok) throw new Error(`API 오류 (${res.status})`);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    return Array.isArray(json.data) ? json.data : [];
+  }, []);
+
+  // ─── 이력 읽기만 (스냅샷 업데이트 안 함) ───
+  const loadHistoryOnly = useCallback(async () => {
+    try {
+      const getRes = await fetch('/api/campfit-history');
+      const getJson = await getRes.json();
+      if (getJson.configured) {
+        setHistoryConfigured(true);
+        setHistorySource(getJson.configStatus?.source || '');
+        setHistoryRecords(getJson.history || []);
+
+        // 런타임 오류가 있으면 오류 표시 (설정은 됨)
+        if (getJson.runtimeError) {
+          setHistoryError(`⚠️ 연동은 설정되었으나 API 오류: ${getJson.error || '알 수 없는 오류'}`);
+        } else {
+          setHistoryError(null);
+        }
+
+        // 이력에서 이탈/재입점 추출
+        const history: HistoryRecord[] = getJson.history || [];
+        setLostCampgrounds(history.filter((h: HistoryRecord) => h.type === '이탈').map((h: HistoryRecord) => h.campground));
+        setRejoinedCampgrounds(history.filter((h: HistoryRecord) => h.type === '재입점').map((h: HistoryRecord) => h.campground));
+      } else {
+        setHistoryConfigured(false);
+        setHistoryError(getJson.error || getJson.message || '서버 연동 실패');
+      }
+    } catch (err: any) {
+      setHistoryConfigured(false);
+      setHistoryError(err?.message || '이력 API 호출 실패');
+    }
+  }, []);
+
+  // ─── 초기 데이터 로드 (이력 업데이트 없이) ───
+  const initialLoad = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const ts = Date.now();
-      const res = await fetch(`/api/campfit-reservations?t=${ts}`, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' } });
-      if (!res.ok) throw new Error(`API 오류 (${res.status})`);
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      const rows: CampfitPlanRecord[] = Array.isArray(json.data) ? json.data : [];
+      const rows = await loadSheetData();
+      setData(rows);
+      await loadHistoryOnly();
+    } catch (e: any) {
+      console.error(e);
+      setError(e?.message || '데이터를 불러오는 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  }, [loadSheetData, loadHistoryOnly]);
+
+  // ─── 새로고침: 데이터 로드 + 이력 업데이트 (스냅샷 비교) ───
+  const refreshWithHistoryUpdate = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const rows = await loadSheetData();
       setData(rows);
 
       const uniqueNames = [...new Set(rows.map((r) => r.campgroundName).filter(Boolean))];
@@ -158,10 +259,15 @@ export default function CampfitDashboardPage() {
         if (histJson.configured) {
           setHistoryConfigured(true);
           setHistorySource(histJson.configStatus?.source || '');
+          // POST 결과에서 바로 이탈/재입점 가져오기
           setLostCampgrounds(histJson.lost || []);
           setRejoinedCampgrounds(histJson.rejoined || []);
-          setNewlyFoundCampgrounds(histJson.newlyFound || []);
+          // 런타임 오류가 있으면 경고 표시 (설정은 됨)
+          if (histJson.runtimeError) {
+            setHistoryError(`⚠️ 연동은 설정되었으나 API 오류: ${histJson.error || '알 수 없는 오류'}`);
+          }
           try { window.localStorage.removeItem(LS_SNAPSHOT_KEY); window.localStorage.removeItem(LS_HISTORY_KEY); } catch {}
+          // 전체 이력도 다시 가져오기
           const getRes = await fetch('/api/campfit-history');
           const getJson = await getRes.json();
           if (getJson.history) setHistoryRecords(getJson.history);
@@ -169,19 +275,69 @@ export default function CampfitDashboardPage() {
           setHistoryConfigured(false);
           setHistoryError(histJson.error || histJson.message || '서버 연동 실패');
           const local = localCalculateChurn(uniqueNames);
-          setLostCampgrounds(local.lost); setRejoinedCampgrounds(local.rejoined); setNewlyFoundCampgrounds(local.newlyFound);
+          setLostCampgrounds(local.lost);
+          setRejoinedCampgrounds(local.rejoined);
         }
       } catch (histErr: any) {
-        setHistoryConfigured(false); setHistoryError(histErr?.message || '이력 API 호출 실패');
+        setHistoryConfigured(false);
+        setHistoryError(histErr?.message || '이력 API 호출 실패');
         const local = localCalculateChurn(uniqueNames);
-        setLostCampgrounds(local.lost); setRejoinedCampgrounds(local.rejoined); setNewlyFoundCampgrounds(local.newlyFound);
+        setLostCampgrounds(local.lost);
+        setRejoinedCampgrounds(local.rejoined);
       }
     } catch (e: any) {
-      console.error(e); setError(e?.message || '데이터를 불러오는 중 오류가 발생했습니다.');
-    } finally { setLoading(false); }
+      console.error(e);
+      setError(e?.message || '데이터를 불러오는 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  }, [loadSheetData]);
+
+  // ─── 이력 초기화 ───
+  const resetHistory = useCallback(async () => {
+    if (!confirm('⚠️ 이력(이탈/재입점 기록)을 모두 초기화하시겠습니까?\n\n초기화 후 현재 시트 상태가 새로운 기준이 됩니다.')) return;
+    setResetting(true);
+    try {
+      // 서버 초기화
+      const res = await fetch('/api/campfit-history', { method: 'DELETE' });
+      const json = await res.json();
+      if (json.success || !json.configured) {
+        // localStorage도 클리어
+        try { window.localStorage.removeItem(LS_SNAPSHOT_KEY); window.localStorage.removeItem(LS_HISTORY_KEY); } catch {}
+        setLostCampgrounds([]);
+        setRejoinedCampgrounds([]);
+        setHistoryRecords([]);
+        alert('✅ 이력이 초기화되었습니다.\n\n다음 새로고침 시 현재 시트 상태가 새로운 기준이 됩니다.');
+      } else {
+        alert(`❌ 초기화 실패: ${json.error || '알 수 없는 오류'}`);
+      }
+    } catch (e: any) {
+      alert(`❌ 초기화 실패: ${e?.message || '네트워크 오류'}`);
+    } finally {
+      setResetting(false);
+    }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  // ─── 거래액/매출 데이터 로드 ───
+  const loadTransactions = useCallback(async () => {
+    try {
+      setTxLoading(true);
+      setTxError(null);
+      const ts = Date.now();
+      const res = await fetch(`/api/campfit-transactions?t=${ts}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`거래액 API 오류 (${res.status})`);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setTxData(json.data || null);
+    } catch (e: any) {
+      console.error('[Transactions]', e);
+      setTxError(e?.message || '거래액/매출 데이터 로드 실패');
+    } finally {
+      setTxLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { initialLoad(); }, [initialLoad]);
 
   // ─── 필터 적용 데이터 ───
   const filteredData = useMemo(() => {
@@ -214,11 +370,37 @@ export default function CampfitDashboardPage() {
   const availableMonths = useMemo(() => { const set = new Set<string>(); allDates.forEach((d) => set.add(getMonthKey(d))); return [...set].sort().reverse(); }, [allDates]);
   const availableWeeks = useMemo(() => { const set = new Set<string>(); allDates.forEach((d) => set.add(getWeekKey(d))); return [...set].sort().reverse(); }, [allDates]);
 
+  // 이력 기반 기간 옵션 (이탈/재입점 이력의 날짜에서 추출)
+  const historyMonths = useMemo(() => {
+    const set = new Set<string>();
+    // 이력 기록 날짜에서 추출
+    historyRecords.forEach((h) => {
+      const d = parseHistoryDate(h.date);
+      if (d) set.add(getMonthKey(d));
+    });
+    // 현재 월도 추가
+    set.add(getMonthKey(now));
+    return [...set].sort().reverse();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyRecords]);
+
+  const historyWeeks = useMemo(() => {
+    const set = new Set<string>();
+    historyRecords.forEach((h) => {
+      const d = parseHistoryDate(h.date);
+      if (d) set.add(getWeekKey(d));
+    });
+    set.add(getWeekKey(now));
+    return [...set].sort().reverse();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyRecords]);
+
   useEffect(() => {
     if (data.length > 0) {
       const curMonth = getMonthKey(now);
       if (!changesPeriodValue) setChangesPeriodValue(availableMonths.includes(curMonth) ? curMonth : availableMonths[0] || curMonth);
       if (!mdPeriodValue) setMdPeriodValue(availableMonths.includes(curMonth) ? curMonth : availableMonths[0] || curMonth);
+      if (!churnPeriodValue) setChurnPeriodValue(curMonth);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
@@ -307,6 +489,32 @@ export default function CampfitDashboardPage() {
   const changeByType = useMemo(() => countByKey(periodPlanChanges, (r) => r.campgroundType), [periodPlanChanges]);
   const changeByGrade = useMemo(() => countByKey(periodPlanChanges, (r) => r.grade || '미지정'), [periodPlanChanges]);
 
+  // ★ 이탈/재입점 이력을 기간별로 필터
+  const churnRange = useMemo(() => churnPeriodValue ? getPeriodRange(churnPeriodType, churnPeriodValue) : null, [churnPeriodType, churnPeriodValue]);
+  const churnPeriodLabel = useMemo(() => !churnPeriodValue ? '' : churnPeriodType === 'week' ? getWeekLabel(churnPeriodValue) : getMonthLabel(churnPeriodValue), [churnPeriodType, churnPeriodValue]);
+
+  const filteredLost = useMemo(() => {
+    if (!churnRange || historyRecords.length === 0) return lostCampgrounds; // 이력이 없으면 전체 표시
+    return historyRecords
+      .filter((h) => {
+        if (h.type !== '이탈') return false;
+        const d = parseHistoryDate(h.date);
+        return d ? dateInRange(d, churnRange.start, churnRange.end) : false;
+      })
+      .map((h) => h.campground);
+  }, [historyRecords, churnRange, lostCampgrounds]);
+
+  const filteredRejoined = useMemo(() => {
+    if (!churnRange || historyRecords.length === 0) return rejoinedCampgrounds;
+    return historyRecords
+      .filter((h) => {
+        if (h.type !== '재입점') return false;
+        const d = parseHistoryDate(h.date);
+        return d ? dateInRange(d, churnRange.start, churnRange.end) : false;
+      })
+      .map((h) => h.campground);
+  }, [historyRecords, churnRange, rejoinedCampgrounds]);
+
   // 추이 차트
   const newTrend = useMemo(() => {
     const map = new Map<string, number>();
@@ -342,7 +550,6 @@ export default function CampfitDashboardPage() {
       stat.campgrounds.add(r.campgroundName);
       if (isEnded(r)) stat.endedCount += 1; else stat.activeCount += 1;
 
-      // 유형·등급 분포
       stat.types.set(r.campgroundType, (stat.types.get(r.campgroundType) ?? 0) + 1);
       const g = r.grade || '미지정';
       stat.grades.set(g, (stat.grades.get(g) ?? 0) + 1);
@@ -397,11 +604,31 @@ export default function CampfitDashboardPage() {
     { key: 'overview', label: '운영 현황', icon: '📊' },
     { key: 'changes', label: '신규 / 이탈 / 변경', icon: '📈' },
     { key: 'md', label: 'MD별 현황', icon: '👤' },
+    { key: 'transactions', label: '거래액 / 매출', icon: '💰' },
   ];
 
-  // ─── 렌더링 ───
+  // 거래액 탭 처음 클릭 시 데이터 로드
+  const handleTabChange = useCallback((tab: TabKey) => {
+    setActiveTab(tab);
+    if (tab === 'transactions' && !txData && !txLoading) {
+      loadTransactions();
+    }
+  }, [txData, txLoading, loadTransactions]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
+      {/* ─── 상세 리스트 모달 ─── */}
+      {modalOpen && (
+        <DetailListModal
+          title={modalTitle}
+          color={modalColor}
+          mode={modalMode}
+          records={modalRecords}
+          names={modalNames}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
+
       {/* ─── 헤더 ─── */}
       <header className="bg-white/90 backdrop-blur-md border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-[1400px] mx-auto px-4 md:px-6 py-4">
@@ -412,28 +639,29 @@ export default function CampfitDashboardPage() {
               </h1>
               <p className="text-xs md:text-sm text-gray-500 mt-1">
                 Google Sheets 실시간 연동 · {format(now, 'yyyy.MM.dd HH:mm')}
-                {historyConfigured === true && <span className="ml-2 text-emerald-600 font-semibold">✅ 이력관리 활성{historySource ? ` (${historySource})` : ''}</span>}
+                {historyConfigured === true && !historyError && <span className="ml-2 text-emerald-600 font-semibold">✅ 이력관리 활성{historySource ? ` (${historySource})` : ''}</span>}
+                {historyConfigured === true && historyError && <span className="ml-2 text-blue-600 font-semibold">ℹ️ 이력: 연동됨 (일시 오류)</span>}
                 {historyConfigured === false && <span className="ml-2 text-amber-600 font-semibold">⚠️ 이력: 브라우저 저장</span>}
               </p>
             </div>
             <div className="flex items-center gap-3 flex-wrap">
-              {/* 유형 필터 */}
               <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="px-3 py-2 border-2 border-indigo-200 rounded-xl text-sm font-medium focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 bg-white">
                 {typeOptions.map((t) => <option key={t} value={t}>{t === '전체' ? '🏕️ 유형: 전체' : `🏕️ ${t}`}</option>)}
               </select>
-              {/* 등급 필터 */}
               <select value={filterGrade} onChange={(e) => setFilterGrade(e.target.value)} className="px-3 py-2 border-2 border-purple-200 rounded-xl text-sm font-medium focus:border-purple-500 focus:ring-2 focus:ring-purple-200 bg-white">
                 {gradeOptions.map((g) => <option key={g} value={g}>{g === '전체' ? '🏆 등급: 전체' : `🏆 ${g}등급`}</option>)}
               </select>
-              <button onClick={fetchData} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 transition-all shadow-lg">🔄 새로고침</button>
+              <button onClick={refreshWithHistoryUpdate} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 transition-all shadow-lg">
+                🔄 새로고침 (이력 업데이트)
+              </button>
               <div className="bg-indigo-50 text-indigo-700 px-3 py-2 rounded-lg text-sm font-bold">
                 {filterType !== '전체' || filterGrade !== '전체' ? `필터 ${totalRecords.toLocaleString()}건` : `전체 ${data.length.toLocaleString()}건`}
               </div>
             </div>
           </div>
-          <nav className="mt-4 flex gap-1">
+          <nav className="mt-4 flex gap-1 flex-wrap">
             {tabs.map((tab) => (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+              <button key={tab.key} onClick={() => handleTabChange(tab.key)}
                 className={`px-4 py-2.5 rounded-xl text-sm font-semibold transition-all ${activeTab === tab.key ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'}`}>
                 {tab.icon} {tab.label}
               </button>
@@ -447,7 +675,6 @@ export default function CampfitDashboardPage() {
         {/* ═══ 탭 1: 운영 현황 ═══ */}
         {activeTab === 'overview' && (
           <>
-            {/* KPI 카드 */}
             <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
               <KPICard label="전체 등록 건수" value={totalRecords.toLocaleString()} sub="시트 전체 행 수" gradient="from-blue-500 to-indigo-600" />
               <KPICard label="등록 캠핑장 수" value={totalCampgrounds.toLocaleString()} sub="고유 캠핑장명 기준" gradient="from-emerald-500 to-teal-600" />
@@ -455,7 +682,6 @@ export default function CampfitDashboardPage() {
               <KPICard label="종료 / 취소" value={endedRecords.toLocaleString()} sub={`전체의 ${totalRecords ? ((endedRecords / totalRecords) * 100).toFixed(1) : 0}%`} gradient="from-rose-500 to-pink-600" />
             </section>
 
-            {/* 유형별 & 등급별 분포 */}
             <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <div className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
                 <h2 className="text-lg font-bold text-gray-800 mb-4">🏕️ 유형별 입점 현황</h2>
@@ -505,7 +731,6 @@ export default function CampfitDashboardPage() {
               </div>
             </section>
 
-            {/* 유형 × 등급 교차분석 */}
             <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-4">📊 유형 × 등급 교차분석</h2>
               <div className="overflow-auto">
@@ -537,7 +762,6 @@ export default function CampfitDashboardPage() {
               </div>
             </section>
 
-            {/* 대표플랜별 & 운영/플랜 상태 */}
             <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <div className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
                 <h2 className="text-lg font-bold text-gray-800 mb-4">📋 대표플랜별 등록 현황</h2>
@@ -588,12 +812,15 @@ export default function CampfitDashboardPage() {
               onTypeChange={(t) => { setChangesPeriodType(t); if (t === 'week') setChangesPeriodValue(availableWeeks[0] || getWeekKey(now)); else setChangesPeriodValue(availableMonths[0] || getMonthKey(now)); }}
               onValueChange={setChangesPeriodValue} label={changesPeriodLabel} />
 
-            <section className="grid grid-cols-2 lg:grid-cols-5 gap-4">
-              <KPICard label="신규 입점" value={`${periodTrueNewCampgrounds.length}`} sub={`${changesPeriodLabel} · 처음 등장한 캠핑장`} gradient="from-emerald-500 to-green-600" />
-              <KPICard label="플랜 변경/추가" value={`${periodPlanChangeCampgrounds.length}`} sub={`${changesPeriodLabel} · 기존 캠핑장 새 플랜`} gradient="from-purple-500 to-violet-600" />
-              <KPICard label="이탈 캠핑장" value={lostCampgrounds.length.toLocaleString()} sub="이전 대비 사라진 캠핑장" gradient="from-rose-500 to-red-600" />
-              <KPICard label="재입점 캠핑장" value={rejoinedCampgrounds.length.toLocaleString()} sub="이전 이탈 후 복귀" gradient="from-amber-500 to-orange-600" />
-              <KPICard label="시트 신규 발견" value={newlyFoundCampgrounds.length.toLocaleString()} sub="이전 스냅샷에 없던 신규" gradient="from-blue-500 to-indigo-600" />
+            <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <KPICard label="신규 입점" value={`${periodTrueNewCampgrounds.length}`} sub={`${changesPeriodLabel} · 처음 등장한 캠핑장`} gradient="from-emerald-500 to-green-600"
+                onClick={() => openDetailModal(`🆕 ${changesPeriodLabel} 신규 입점 캠핑장 (${periodTrueNewCampgrounds.length}개)`, 'emerald', periodTrueNew)} />
+              <KPICard label="플랜 변경/추가" value={`${periodPlanChangeCampgrounds.length}`} sub={`${changesPeriodLabel} · 기존 캠핑장 새 플랜`} gradient="from-purple-500 to-violet-600"
+                onClick={() => openDetailModal(`🔄 ${changesPeriodLabel} 플랜 변경/추가 (${periodPlanChangeCampgrounds.length}개 캠핑장)`, 'purple', periodPlanChanges)} />
+              <KPICard label={`이탈 (${churnPeriodLabel || '전체'})`} value={filteredLost.length.toLocaleString()} sub="스냅샷 기반 이탈" gradient="from-rose-500 to-red-600"
+                onClick={() => openDetailModal(`🔴 이탈 캠핑장 (${filteredLost.length}개) — ${churnPeriodLabel || '전체'}`, 'red', undefined, filteredLost)} />
+              <KPICard label={`재입점 (${churnPeriodLabel || '전체'})`} value={filteredRejoined.length.toLocaleString()} sub="이전 이탈 후 복귀" gradient="from-amber-500 to-orange-600"
+                onClick={() => openDetailModal(`🟢 재입점 캠핑장 (${filteredRejoined.length}개) — ${churnPeriodLabel || '전체'}`, 'amber', undefined, filteredRejoined)} />
             </section>
 
             {/* 유형별·등급별 신규/변경 분석 */}
@@ -724,10 +951,32 @@ export default function CampfitDashboardPage() {
               )}
             </section>
 
-            {/* 이탈 / 재입점 */}
-            <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <ChurnList title="🔴 이탈 캠핑장" items={lostCampgrounds} color="red" emptyMessage="이전 스냅샷 대비 이탈한 캠핑장이 없습니다." />
-              <ChurnList title="🟢 재입점 캠핑장" items={rejoinedCampgrounds} color="emerald" emptyMessage="이전에 이탈했다가 다시 입점한 캠핑장이 없습니다." />
+            {/* ─── 이탈 / 재입점 (기간별 조회) ─── */}
+            <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-5">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+                <h2 className="text-lg font-bold text-gray-800">🔴🟢 이탈 / 재입점 현황</h2>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
+                    <button onClick={() => { setChurnPeriodType('week'); setChurnPeriodValue(historyWeeks[0] || getWeekKey(now)); }} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${churnPeriodType === 'week' ? 'bg-indigo-600 text-white shadow' : 'text-gray-600'}`}>📅 주간</button>
+                    <button onClick={() => { setChurnPeriodType('month'); setChurnPeriodValue(historyMonths[0] || getMonthKey(now)); }} className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${churnPeriodType === 'month' ? 'bg-indigo-600 text-white shadow' : 'text-gray-600'}`}>🗓️ 월간</button>
+                  </div>
+                  <select value={churnPeriodValue} onChange={(e) => setChurnPeriodValue(e.target.value)} className="px-3 py-2 border-2 border-gray-300 rounded-xl text-sm font-medium focus:border-indigo-500 min-w-[180px]">
+                    {(churnPeriodType === 'week' ? historyWeeks : historyMonths).map((opt) => (
+                      <option key={opt} value={opt}>{churnPeriodType === 'week' ? getWeekLabel(opt) : getMonthLabel(opt)}</option>
+                    ))}
+                  </select>
+                  <button onClick={resetHistory} disabled={resetting} className="px-3 py-2 rounded-xl bg-red-100 text-red-700 text-xs font-semibold hover:bg-red-200 transition-all disabled:opacity-50">
+                    {resetting ? '초기화 중...' : '🗑️ 이력 초기화'}
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mb-4">
+                ⓘ 이탈/재입점은 <strong>새로고침 (이력 업데이트)</strong> 버튼을 눌러야 현재 시트와 이전 스냅샷을 비교하여 기록됩니다. 기간: <strong>{churnPeriodLabel || '전체'}</strong>
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <ChurnList title="🔴 이탈 캠핑장" items={filteredLost} color="red" emptyMessage={`${churnPeriodLabel || '해당 기간'}에 이탈한 캠핑장이 없습니다.`} />
+                <ChurnList title="🟢 재입점 캠핑장" items={filteredRejoined} color="emerald" emptyMessage={`${churnPeriodLabel || '해당 기간'}에 재입점한 캠핑장이 없습니다.`} />
+              </div>
             </section>
 
             {/* 이력 기록 */}
@@ -753,6 +1002,21 @@ export default function CampfitDashboardPage() {
                 </div>
               </section>
             )}
+            {/* 런타임 오류 (설정은 됐지만 API 오류) */}
+            {historyConfigured === true && historyError && (
+              <section className="bg-blue-50 rounded-2xl border-2 border-blue-200 p-5">
+                <div className="flex items-start gap-3">
+                  <span className="text-2xl">ℹ️</span>
+                  <div className="flex-1">
+                    <h2 className="text-base font-bold text-blue-800 mb-1">이력관리 서버 연동됨 — 일시적 오류</h2>
+                    <p className="text-sm text-blue-700">{historyError}</p>
+                    <p className="text-xs text-blue-500 mt-1">서비스 계정은 정상 설정되어 있습니다. 새로고침 시 자동 재시도됩니다.</p>
+                  </div>
+                  <button onClick={() => refreshWithHistoryUpdate()} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700">🔄 재시도</button>
+                </div>
+              </section>
+            )}
+            {/* 미설정 (서비스 계정 키가 아예 없음) */}
             {historyConfigured === false && (
               <section className="bg-amber-50 rounded-2xl border-2 border-amber-200 p-6">
                 <h2 className="text-lg font-bold text-amber-800 mb-2">⚠️ 이력관리 서버 연동이 설정되지 않았습니다</h2>
@@ -802,7 +1066,6 @@ export default function CampfitDashboardPage() {
               </section>
             )}
 
-            {/* MD별 종합 현황 (유형·등급 포함) */}
             <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-4">📋 MD별 종합 현황</h2>
               <div className="max-h-[500px] overflow-auto">
@@ -858,6 +1121,37 @@ export default function CampfitDashboardPage() {
             </section>
           </>
         )}
+
+        {/* ═══ 탭 4: 거래액 / 매출 ═══ */}
+        {activeTab === 'transactions' && (
+          <>
+            {txLoading && (
+              <div className="flex items-center justify-center py-20">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-amber-600 border-t-transparent mx-auto mb-3" />
+                  <div className="text-lg font-bold text-gray-700">거래액 / 매출 데이터 로딩 중...</div>
+                </div>
+              </div>
+            )}
+            {txError && (
+              <section className="bg-red-50 rounded-2xl border-2 border-red-200 p-6">
+                <h2 className="text-lg font-bold text-red-800 mb-2">⚠️ 거래액/매출 데이터 로드 실패</h2>
+                <p className="text-sm text-red-700 mb-3">{txError}</p>
+                <button onClick={loadTransactions} className="px-4 py-2 rounded-xl bg-red-600 text-white text-sm font-semibold">🔄 다시 시도</button>
+              </section>
+            )}
+            {txData && !txLoading && (
+              <TransactionDashboard data={txData} onRefresh={loadTransactions} />
+            )}
+            {!txData && !txLoading && !txError && (
+              <div className="flex items-center justify-center py-20">
+                <button onClick={loadTransactions} className="px-6 py-3 rounded-xl bg-amber-600 text-white font-semibold hover:bg-amber-700 transition-all shadow-lg">
+                  💰 거래액/매출 데이터 불러오기
+                </button>
+              </div>
+            )}
+          </>
+        )}
       </main>
     </div>
   );
@@ -888,12 +1182,16 @@ function PeriodSelector({ periodType, periodValue, availableMonths, availableWee
   );
 }
 
-function KPICard({ label, value, sub, gradient }: { label: string; value: string; sub?: string; gradient: string }) {
+function KPICard({ label, value, sub, gradient, onClick }: { label: string; value: string; sub?: string; gradient: string; onClick?: () => void }) {
   return (
-    <div className={`bg-gradient-to-br ${gradient} text-white rounded-2xl shadow-lg p-5 transform hover:scale-[1.02] transition-all`}>
+    <div
+      onClick={onClick}
+      className={`bg-gradient-to-br ${gradient} text-white rounded-2xl shadow-lg p-5 transform hover:scale-[1.02] transition-all ${onClick ? 'cursor-pointer ring-0 hover:ring-4 hover:ring-white/30' : ''}`}
+    >
       <div className="text-xs md:text-sm font-medium text-white/80 mb-1">{label}</div>
       <div className="text-2xl md:text-3xl font-extrabold truncate">{value}</div>
       {sub && <div className="text-[11px] md:text-xs text-white/70 mt-1">{sub}</div>}
+      {onClick && <div className="text-[10px] text-white/50 mt-2 flex items-center gap-1">👆 클릭하여 상세 목록 보기</div>}
     </div>
   );
 }
@@ -929,7 +1227,7 @@ function ChurnList({ title, items, color, emptyMessage }: { title: string; items
       </div>
       {items.length === 0 ? <p className="text-gray-500 text-sm">{emptyMessage}</p> : (
         <ul className="max-h-[250px] overflow-auto text-sm space-y-1">
-          {items.map((name) => <li key={name} className={`px-3 py-2 ${itemBg[color]} rounded-lg text-gray-800`}>{name}</li>)}
+          {items.map((name, i) => <li key={`${name}-${i}`} className={`px-3 py-2 ${itemBg[color]} rounded-lg text-gray-800`}>{name}</li>)}
         </ul>
       )}
     </div>
@@ -1006,10 +1304,509 @@ function DataTable({ data, title }: { data: CampfitPlanRecord[]; title: string }
   );
 }
 
+// ═══════════════════════════════════════
+// 상세 리스트 모달
+// ═══════════════════════════════════════
+const COLOR_MAP = {
+  emerald: { bg: 'bg-emerald-50', header: 'bg-emerald-100', text: 'text-emerald-800', border: 'border-emerald-200', badge: 'bg-emerald-600' },
+  purple: { bg: 'bg-purple-50', header: 'bg-purple-100', text: 'text-purple-800', border: 'border-purple-200', badge: 'bg-purple-600' },
+  red: { bg: 'bg-red-50', header: 'bg-red-100', text: 'text-red-800', border: 'border-red-200', badge: 'bg-red-600' },
+  amber: { bg: 'bg-amber-50', header: 'bg-amber-100', text: 'text-amber-800', border: 'border-amber-200', badge: 'bg-amber-600' },
+};
+
+function DetailListModal({
+  title,
+  color,
+  mode,
+  records,
+  names,
+  onClose,
+}: {
+  title: string;
+  color: 'emerald' | 'purple' | 'red' | 'amber';
+  mode: 'records' | 'names';
+  records: CampfitPlanRecord[];
+  names: string[];
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState('');
+  const cm = COLOR_MAP[color];
+
+  // 검색 필터
+  const filteredRecords = useMemo(() => {
+    if (!search.trim()) return records;
+    const q = search.trim().toLowerCase();
+    return records.filter((r) =>
+      r.campgroundName.toLowerCase().includes(q) ||
+      (r.md || '').toLowerCase().includes(q) ||
+      (r.mainPlanName || '').toLowerCase().includes(q)
+    );
+  }, [records, search]);
+
+  const filteredNames = useMemo(() => {
+    if (!search.trim()) return names;
+    const q = search.trim().toLowerCase();
+    return names.filter((n) => n.toLowerCase().includes(q));
+  }, [names, search]);
+
+  // 중복 제거된 캠핑장 목록 (records 모드)
+  const uniqueCampgrounds = useMemo(() => {
+    const map = new Map<string, CampfitPlanRecord>();
+    filteredRecords.forEach((r) => {
+      if (!map.has(r.campgroundName)) map.set(r.campgroundName, r);
+    });
+    return [...map.values()];
+  }, [filteredRecords]);
+
+  const totalCount = mode === 'records' ? uniqueCampgrounds.length : filteredNames.length;
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden animate-in"
+        onClick={(e) => e.stopPropagation()}
+        style={{ animation: 'modalSlideUp 0.25s ease-out' }}
+      >
+        {/* 모달 헤더 */}
+        <div className={`${cm.header} px-6 py-4 border-b ${cm.border} flex items-center justify-between shrink-0`}>
+          <div>
+            <h2 className={`text-lg font-bold ${cm.text}`}>{title}</h2>
+            <p className="text-xs text-gray-500 mt-0.5">{totalCount}개 캠핑장</p>
+          </div>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-white/60 transition-all text-gray-500 hover:text-gray-800">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        {/* 검색바 */}
+        <div className="px-6 py-3 border-b border-gray-100 shrink-0">
+          <input
+            type="text"
+            placeholder="🔍 캠핑장명, MD, 플랜 검색..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full px-4 py-2.5 rounded-xl border-2 border-gray-200 text-sm focus:border-indigo-400 focus:outline-none transition-all"
+            autoFocus
+          />
+        </div>
+
+        {/* 리스트 */}
+        <div className="flex-1 overflow-auto px-6 py-3">
+          {mode === 'records' ? (
+            uniqueCampgrounds.length === 0 ? (
+              <p className="text-center text-gray-400 py-10">해당하는 캠핑장이 없습니다.</p>
+            ) : (
+              <div className="space-y-2">
+                {uniqueCampgrounds.map((r, idx) => (
+                  <div key={r.campgroundName + idx} className={`${cm.bg} rounded-xl p-4 border ${cm.border} hover:shadow-md transition-all`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className={`${cm.badge} text-white text-[10px] font-bold px-2 py-0.5 rounded-full`}>{idx + 1}</span>
+                          <h3 className="font-bold text-gray-900 truncate">{r.campgroundName}</h3>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-xs text-gray-600">
+                          {r.campgroundType && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: (TYPE_COLORS[r.campgroundType] || '#94a3b8') + '15', color: TYPE_COLORS[r.campgroundType] || '#64748b' }}>{r.campgroundType}</span>}
+                          {r.grade && <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ backgroundColor: (GRADE_COLORS[r.grade] || '#94a3b8') + '15', color: GRADE_COLORS[r.grade] || '#64748b' }}>{r.grade}등급</span>}
+                          {r.mainPlanName && <span className="text-gray-500">📋 {r.mainPlanName}</span>}
+                          {r.planStartDate && <span className="text-gray-500">📅 {r.planStartDate}</span>}
+                        </div>
+                      </div>
+                      {r.md && (
+                        <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-lg shrink-0">👤 {r.md}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : (
+            filteredNames.length === 0 ? (
+              <p className="text-center text-gray-400 py-10">해당하는 캠핑장이 없습니다.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {filteredNames.map((name, idx) => (
+                  <div key={name + idx} className={`${cm.bg} rounded-xl px-4 py-3 border ${cm.border} hover:shadow-md transition-all flex items-center gap-3`}>
+                    <span className={`${cm.badge} text-white text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0`}>{idx + 1}</span>
+                    <span className="font-semibold text-gray-900">{name}</span>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+        </div>
+
+        {/* 모달 푸터 */}
+        <div className="px-6 py-3 border-t border-gray-100 bg-gray-50 shrink-0 flex items-center justify-between">
+          <span className="text-xs text-gray-400">총 {totalCount}개</span>
+          <button onClick={onClose} className="px-5 py-2 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-900 transition-all">닫기</button>
+        </div>
+      </div>
+
+      {/* 모달 애니메이션 */}
+      <style jsx>{`
+        @keyframes modalSlideUp {
+          from { opacity: 0; transform: translateY(20px) scale(0.97); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 function StatusBadge({ value, type }: { value?: string; type: 'operate' | 'plan' }) {
   if (!value) return <span className="text-gray-400">-</span>;
   const isGood = type === 'operate' ? value.includes('운영') || value.includes('정상') : value.includes('정상') || value.includes('사용');
   const isBad = type === 'operate' ? value.includes('중단') || value.includes('종료') : value.includes('종료') || value.includes('취소');
   const cls = isGood ? 'bg-emerald-100 text-emerald-700' : isBad ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700';
   return <span className={`px-2 py-1 rounded-full text-xs font-semibold ${cls}`}>{value}</span>;
+}
+
+// ═══════════════════════════════════════
+// 거래액 / 매출 대시보드 컴포넌트
+// ═══════════════════════════════════════
+
+const YEAR_COLORS: Record<string, string> = {
+  '2021': '#94a3b8', '2022': '#06b6d4', '2023': '#a855f7',
+  '2024': '#f97316', '2025': '#22c55e', '2026': '#4f46e5',
+};
+
+const MONTH_LABELS = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8월', '9월', '10월', '11월', '12월'];
+
+function formatAmount(value: number, compact = false): string {
+  if (value === 0) return '0';
+  if (compact) {
+    if (value >= 1_0000_0000) return `${(value / 1_0000_0000).toFixed(1)}억`;
+    if (value >= 1_0000) return `${(value / 1_0000).toFixed(0)}만`;
+    return value.toLocaleString();
+  }
+  return value.toLocaleString();
+}
+
+function TransactionDashboard({ data, onRefresh }: { data: TransactionData; onRefresh: () => void }) {
+  const [selectedSection, setSelectedSection] = useState(0);
+  const [selectedYears, setSelectedYears] = useState<Set<string>>(new Set());
+
+  // 모든 연도 목록 추출
+  const allYears = useMemo(() => {
+    const set = new Set<string>();
+    data.sections.forEach((s) => s.data.forEach((d) => set.add(d.year)));
+    return [...set].sort();
+  }, [data]);
+
+  // 선택된 연도 (기본: 최근 3년)
+  useEffect(() => {
+    if (allYears.length > 0 && selectedYears.size === 0) {
+      const recent = allYears.slice(-3);
+      setSelectedYears(new Set(recent));
+    }
+  }, [allYears, selectedYears]);
+
+  const currentSection = data.sections[selectedSection] || null;
+  if (!currentSection && data.sections.length === 0) {
+    return (
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">💰 거래액 / 매출 데이터</h2>
+        <p className="text-gray-500">B179:Q211 범위에서 파싱할 수 있는 데이터가 없습니다.</p>
+        <p className="text-sm text-gray-400 mt-2">총 {data.totalRows}행이 읽혔습니다.</p>
+        {data.rawRows.length > 0 && (
+          <details className="mt-4">
+            <summary className="text-sm text-indigo-600 cursor-pointer font-medium">📋 원본 데이터 확인 (디버깅)</summary>
+            <div className="mt-2 max-h-[400px] overflow-auto">
+              <table className="w-full text-xs border">
+                <tbody>
+                  {data.rawRows.map((row, i) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-2 py-1 bg-gray-50 font-mono text-gray-500">{179 + i}</td>
+                      {row.map((cell, j) => (
+                        <td key={j} className="px-2 py-1 border-l">{cell || <span className="text-gray-300">-</span>}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+        <button onClick={onRefresh} className="mt-4 px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-semibold">🔄 다시 불러오기</button>
+      </section>
+    );
+  }
+
+  // 현재 섹션의 필터된 데이터
+  const filteredData = currentSection ? currentSection.data.filter((d) => selectedYears.has(d.year)) : [];
+
+  // 월별 비교 차트 데이터
+  const monthlyChartData = useMemo(() => {
+    return MONTH_LABELS.map((label, idx) => {
+      const item: Record<string, string | number> = { month: label };
+      filteredData.forEach((yd) => {
+        item[yd.year] = yd.months[idx] || 0;
+      });
+      return item;
+    });
+  }, [filteredData]);
+
+  // 연도별 누계 비교
+  const yearlyTotalData = useMemo(() => {
+    return filteredData.map((yd) => ({
+      year: yd.year,
+      total: yd.total,
+    }));
+  }, [filteredData]);
+
+  // 최신 연도의 최신 월 찾기 (값이 0이 아닌)
+  const latestYearData = useMemo(() => {
+    if (filteredData.length === 0) return null;
+    const sorted = [...filteredData].sort((a, b) => b.year.localeCompare(a.year));
+    return sorted[0];
+  }, [filteredData]);
+
+  const latestMonth = useMemo(() => {
+    if (!latestYearData) return -1;
+    for (let i = 11; i >= 0; i--) {
+      if (latestYearData.months[i] > 0) return i;
+    }
+    return -1;
+  }, [latestYearData]);
+
+  // YoY 비교 (전년 동월 대비)
+  const yoyComparison = useMemo(() => {
+    if (!latestYearData || latestMonth < 0) return null;
+    const prevYearStr = String(Number(latestYearData.year) - 1);
+    const prevYearData = currentSection?.data.find((d) => d.year === prevYearStr);
+    if (!prevYearData) return null;
+    const current = latestYearData.months[latestMonth];
+    const previous = prevYearData.months[latestMonth];
+    if (previous === 0) return null;
+    const changeRate = ((current - previous) / previous) * 100;
+    return {
+      currentYear: latestYearData.year,
+      prevYear: prevYearStr,
+      month: latestMonth + 1,
+      current,
+      previous,
+      changeRate,
+    };
+  }, [latestYearData, latestMonth, currentSection]);
+
+  return (
+    <div className="space-y-6">
+      {/* 섹션 선택 + 연도 필터 */}
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-5">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+          {/* 섹션 탭 */}
+          <div className="flex gap-1 bg-gray-100 rounded-xl p-1 flex-wrap">
+            {data.sections.map((s, idx) => (
+              <button key={idx} onClick={() => setSelectedSection(idx)}
+                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${selectedSection === idx ? 'bg-amber-600 text-white shadow' : 'text-gray-600 hover:text-gray-900'}`}>
+                {s.title.replace(/^[IVX]+\.\s*/, '')}
+              </button>
+            ))}
+          </div>
+
+          {/* 연도 필터 */}
+          <div className="flex gap-2 flex-wrap items-center">
+            <span className="text-xs text-gray-500 font-medium">연도:</span>
+            {allYears.map((year) => (
+              <button key={year} onClick={() => {
+                const next = new Set(selectedYears);
+                if (next.has(year)) next.delete(year); else next.add(year);
+                if (next.size > 0) setSelectedYears(next);
+              }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all border-2 ${selectedYears.has(year)
+                  ? 'text-white border-transparent shadow'
+                  : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'}`}
+                style={selectedYears.has(year) ? { backgroundColor: YEAR_COLORS[year] || '#4f46e5', borderColor: YEAR_COLORS[year] || '#4f46e5' } : {}}>
+                {year}
+              </button>
+            ))}
+          </div>
+
+          <button onClick={onRefresh} className="ml-auto px-3 py-2 rounded-xl bg-gray-100 text-gray-700 text-sm font-semibold hover:bg-gray-200">🔄</button>
+        </div>
+        {currentSection?.unit && <p className="text-xs text-gray-400 mt-2">{currentSection.unit}</p>}
+      </section>
+
+      {/* KPI 카드 */}
+      {latestYearData && latestMonth >= 0 && (
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <KPICard
+            label={`${latestYearData.year}년 누계`}
+            value={formatAmount(latestYearData.total, true)}
+            sub={currentSection?.title.replace(/^[IVX]+\.\s*/, '') || ''}
+            gradient="from-amber-500 to-orange-600"
+          />
+          <KPICard
+            label={`${latestYearData.year}년 ${latestMonth + 1}월`}
+            value={formatAmount(latestYearData.months[latestMonth], true)}
+            sub="최신 월 데이터"
+            gradient="from-blue-500 to-indigo-600"
+          />
+          {yoyComparison && (
+            <KPICard
+              label={`전년 동월 대비 (${yoyComparison.month}월)`}
+              value={`${yoyComparison.changeRate > 0 ? '+' : ''}${yoyComparison.changeRate.toFixed(1)}%`}
+              sub={`${yoyComparison.prevYear}: ${formatAmount(yoyComparison.previous, true)}`}
+              gradient={yoyComparison.changeRate >= 0 ? 'from-emerald-500 to-green-600' : 'from-rose-500 to-red-600'}
+            />
+          )}
+          {filteredData.length >= 2 && (
+            <KPICard
+              label={`${filteredData[filteredData.length - 2]?.year}년 누계`}
+              value={formatAmount(filteredData[filteredData.length - 2]?.total || 0, true)}
+              sub="이전 연도 참고"
+              gradient="from-gray-500 to-gray-600"
+            />
+          )}
+        </section>
+      )}
+
+      {/* 월별 비교 라인 차트 */}
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">📈 월별 추이 비교 — {currentSection?.title.replace(/^[IVX]+\.\s*/, '')}</h2>
+        <div className="h-80 md:h-96">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={monthlyChartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="month" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v: number) => formatAmount(v, true)} />
+              <Tooltip
+                formatter={(value: number, name: string) => [formatAmount(value), `${name}년`]}
+                contentStyle={{ borderRadius: '12px', border: '1px solid #e5e7eb' }}
+              />
+              <Legend />
+              {filteredData.map((yd) => (
+                <Line
+                  key={yd.year}
+                  type="monotone"
+                  dataKey={yd.year}
+                  name={`${yd.year}년`}
+                  stroke={YEAR_COLORS[yd.year] || '#4f46e5'}
+                  strokeWidth={yd.year === latestYearData?.year ? 3 : 2}
+                  dot={{ r: yd.year === latestYearData?.year ? 4 : 3 }}
+                  activeDot={{ r: 6 }}
+                  connectNulls
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      {/* 연도별 누계 막대 차트 */}
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">📊 연도별 누계 비교</h2>
+        <div className="h-64 md:h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={yearlyTotalData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="year" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 10 }} tickFormatter={(v: number) => formatAmount(v, true)} />
+              <Tooltip
+                formatter={(value: number) => [formatAmount(value), '누계']}
+                contentStyle={{ borderRadius: '12px', border: '1px solid #e5e7eb' }}
+              />
+              <Bar dataKey="total" name="누계" radius={[8, 8, 0, 0]}>
+                {yearlyTotalData.map((item) => (
+                  <Cell key={item.year} fill={YEAR_COLORS[item.year] || '#4f46e5'} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      {/* 상세 테이블 */}
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">📋 {currentSection?.title || '상세'} — 연도 × 월별 데이터</h2>
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gradient-to-r from-amber-50 to-orange-50">
+              <tr>
+                <th className="text-left px-3 py-3 font-semibold text-amber-800 sticky left-0 bg-amber-50 z-10">연도</th>
+                <th className="text-right px-3 py-3 font-semibold text-amber-800">누계</th>
+                {MONTH_LABELS.map((m) => (
+                  <th key={m} className="text-right px-3 py-3 font-semibold text-amber-800 whitespace-nowrap">{m}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredData.map((yd, idx) => (
+                <tr key={yd.year} className={`border-t border-gray-100 ${idx === filteredData.length - 1 ? 'bg-amber-50/40 font-bold' : 'hover:bg-amber-50/30'}`}>
+                  <td className="px-3 py-3 font-bold sticky left-0 bg-white z-10" style={{ color: YEAR_COLORS[yd.year] || '#4f46e5' }}>
+                    {yd.year}
+                  </td>
+                  <td className="text-right px-3 py-3 font-bold text-gray-900">{formatAmount(yd.total)}</td>
+                  {yd.months.map((val, mi) => (
+                    <td key={mi} className="text-right px-3 py-3 whitespace-nowrap">
+                      {val > 0 ? formatAmount(val) : <span className="text-gray-300">-</span>}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* 전체 섹션 요약 (모든 섹션 한 눈에) */}
+      {data.sections.length > 1 && (
+        <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+          <h2 className="text-lg font-bold text-gray-800 mb-4">📌 전체 섹션 요약</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {data.sections.map((sec, idx) => {
+              const latest = sec.data.length > 0 ? sec.data[sec.data.length - 1] : null;
+              return (
+                <div key={idx}
+                  onClick={() => setSelectedSection(idx)}
+                  className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${selectedSection === idx ? 'border-amber-500 bg-amber-50' : 'border-gray-200 hover:border-amber-300 hover:bg-amber-50/30'}`}>
+                  <h3 className="font-bold text-gray-800 text-sm mb-2">{sec.title.replace(/^[IVX]+\.\s*/, '')}</h3>
+                  {sec.unit && <p className="text-xs text-gray-400 mb-1">{sec.unit}</p>}
+                  {latest && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">{latest.year} 누계</span>
+                        <span className="font-bold text-amber-700">{formatAmount(latest.total, true)}</span>
+                      </div>
+                      {(() => {
+                        let lastMonth = -1;
+                        for (let i = 11; i >= 0; i--) { if (latest.months[i] > 0) { lastMonth = i; break; } }
+                        return lastMonth >= 0 ? (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">{lastMonth + 1}월</span>
+                            <span className="font-bold text-indigo-700">{formatAmount(latest.months[lastMonth], true)}</span>
+                          </div>
+                        ) : null;
+                      })()}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-gray-400 mt-2">{sec.data.map((d) => d.year).join(', ')}</p>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* 원본 데이터 (디버깅) */}
+      <details className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <summary className="text-sm text-indigo-600 cursor-pointer font-medium">📋 원본 데이터 확인 (B179:Q211, {data.totalRows}행)</summary>
+        <div className="mt-4 max-h-[400px] overflow-auto">
+          <table className="w-full text-xs border">
+            <tbody>
+              {data.rawRows.map((row, i) => (
+                <tr key={i} className="border-t">
+                  <td className="px-2 py-1 bg-gray-50 font-mono text-gray-500 sticky left-0">{179 + i}</td>
+                  {row.map((cell, j) => (
+                    <td key={j} className="px-2 py-1 border-l max-w-[120px] truncate">{cell || <span className="text-gray-300">-</span>}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+  );
 }
