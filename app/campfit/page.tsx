@@ -1443,13 +1443,13 @@ function DetailListModal({
         </div>
       </div>
 
-      {/* 모달 애니메이션 */}
-      <style jsx>{`
+      {/* 모달 애니메이션 - global style */}
+      <style dangerouslySetInnerHTML={{ __html: `
         @keyframes modalSlideUp {
           from { opacity: 0; transform: translateY(20px) scale(0.97); }
           to { opacity: 1; transform: translateY(0) scale(1); }
         }
-      `}</style>
+      ` }} />
     </div>
   );
 }
@@ -1503,38 +1503,14 @@ function TransactionDashboard({ data, onRefresh }: { data: TransactionData; onRe
   }, [allYears, selectedYears]);
 
   const currentSection = data.sections[selectedSection] || null;
-  if (!currentSection && data.sections.length === 0) {
-    return (
-      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
-        <h2 className="text-lg font-bold text-gray-800 mb-4">💰 거래액 / 매출 데이터</h2>
-        <p className="text-gray-500">B179:Q211 범위에서 파싱할 수 있는 데이터가 없습니다.</p>
-        <p className="text-sm text-gray-400 mt-2">총 {data.totalRows}행이 읽혔습니다.</p>
-        {data.rawRows.length > 0 && (
-          <details className="mt-4">
-            <summary className="text-sm text-indigo-600 cursor-pointer font-medium">📋 원본 데이터 확인 (디버깅)</summary>
-            <div className="mt-2 max-h-[400px] overflow-auto">
-              <table className="w-full text-xs border">
-                <tbody>
-                  {data.rawRows.map((row, i) => (
-                    <tr key={i} className="border-t">
-                      <td className="px-2 py-1 bg-gray-50 font-mono text-gray-500">{179 + i}</td>
-                      {row.map((cell, j) => (
-                        <td key={j} className="px-2 py-1 border-l">{cell || <span className="text-gray-300">-</span>}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        )}
-        <button onClick={onRefresh} className="mt-4 px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-semibold">🔄 다시 불러오기</button>
-      </section>
-    );
-  }
+  const isEmpty = !currentSection && data.sections.length === 0;
 
+  // ★ 핵심 수정: 모든 Hook을 조건부 return 위에 배치 (React Hook 규칙)
   // 현재 섹션의 필터된 데이터
-  const filteredData = currentSection ? currentSection.data.filter((d) => selectedYears.has(d.year)) : [];
+  const filteredData = useMemo(() => {
+    if (!currentSection) return [];
+    return currentSection.data.filter((d) => selectedYears.has(d.year));
+  }, [currentSection, selectedYears]);
 
   // 월별 비교 차트 데이터
   const monthlyChartData = useMemo(() => {
@@ -1589,6 +1565,37 @@ function TransactionDashboard({ data, onRefresh }: { data: TransactionData; onRe
       changeRate,
     };
   }, [latestYearData, latestMonth, currentSection]);
+
+  // ★ 모든 Hook 이후에 조건부 return (빈 데이터 표시)
+  if (isEmpty) {
+    return (
+      <section className="bg-white rounded-2xl shadow-lg border border-gray-200/60 p-6">
+        <h2 className="text-lg font-bold text-gray-800 mb-4">💰 거래액 / 매출 데이터</h2>
+        <p className="text-gray-500">B179:Q211 범위에서 파싱할 수 있는 데이터가 없습니다.</p>
+        <p className="text-sm text-gray-400 mt-2">총 {data.totalRows}행이 읽혔습니다.</p>
+        {data.rawRows.length > 0 && (
+          <details className="mt-4">
+            <summary className="text-sm text-indigo-600 cursor-pointer font-medium">📋 원본 데이터 확인 (디버깅)</summary>
+            <div className="mt-2 max-h-[400px] overflow-auto">
+              <table className="w-full text-xs border">
+                <tbody>
+                  {data.rawRows.map((row, i) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-2 py-1 bg-gray-50 font-mono text-gray-500">{179 + i}</td>
+                      {row.map((cell, j) => (
+                        <td key={j} className="px-2 py-1 border-l">{cell || <span className="text-gray-300">-</span>}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+        <button onClick={onRefresh} className="mt-4 px-4 py-2 rounded-xl bg-amber-600 text-white text-sm font-semibold">🔄 다시 불러오기</button>
+      </section>
+    );
+  }
 
   return (
     <div className="space-y-6">
