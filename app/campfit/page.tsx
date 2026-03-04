@@ -337,6 +337,14 @@ export default function CampfitDashboardPage() {
     }
   }, []);
 
+  // 거래액 탭 처음 클릭 시 데이터 로드
+  const handleTabChange = useCallback((tab: TabKey) => {
+    setActiveTab(tab);
+    if (tab === 'transactions' && !txData && !txLoading) {
+      loadTransactions();
+    }
+  }, [txData, txLoading, loadTransactions]);
+
   useEffect(() => { initialLoad(); }, [initialLoad]);
 
   // ─── 필터 적용 데이터 ───
@@ -606,14 +614,6 @@ export default function CampfitDashboardPage() {
     { key: 'md', label: 'MD별 현황', icon: '👤' },
     { key: 'transactions', label: '거래액 / 매출', icon: '💰' },
   ];
-
-  // 거래액 탭 처음 클릭 시 데이터 로드
-  const handleTabChange = useCallback((tab: TabKey) => {
-    setActiveTab(tab);
-    if (tab === 'transactions' && !txData && !txLoading) {
-      loadTransactions();
-    }
-  }, [txData, txLoading, loadTransactions]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
